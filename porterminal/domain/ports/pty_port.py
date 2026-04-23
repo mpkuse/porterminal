@@ -40,6 +40,11 @@ class PTYPort(ABC):
         ...
 
     @abstractmethod
+    def is_echo_enabled(self) -> bool:
+        """Check if terminal echo is enabled."""
+        ...
+
+    @abstractmethod
     def close(self) -> None:
         """Close PTY and cleanup resources."""
         ...

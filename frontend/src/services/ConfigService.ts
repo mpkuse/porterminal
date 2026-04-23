@@ -3,7 +3,7 @@
  * Single Responsibility: Only handles server config loading and updates
  */
 
-import type { AppConfig, ButtonConfig } from '@/types';
+import type { AppConfig, ButtonConfig, Snippet } from '@/types';
 
 export interface SettingsUpdate {
     compose_mode?: boolean;
@@ -24,6 +24,7 @@ export interface SettingsUpdateResult {
 export interface ButtonResult {
     success: boolean;
     buttons?: ButtonConfig[];
+    snippets?: Snippet[];
     error?: string;
 }
 
@@ -72,7 +73,7 @@ async function buttonRequest(url: string, options: RequestInit): Promise<ButtonR
         if (!response.ok) {
             return { success: false, error: data.error };
         }
-        return { success: true, buttons: data.buttons };
+        return { success: true, buttons: data.buttons, snippets: data.snippets };
     } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }

@@ -75,8 +75,8 @@ include = [
     "pyproject.toml",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "watchfiles>=0.21.0",
     "pre-commit>=4.0.0",
     "ruff>=0.8.0",

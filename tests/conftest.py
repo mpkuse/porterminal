@@ -139,6 +139,9 @@ class FakePTY:
     def is_alive(self) -> bool:
         return self._alive
 
+    def is_echo_enabled(self) -> bool:
+        return True
+
     def close(self) -> None:
         self._alive = False
 

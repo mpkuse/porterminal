@@ -97,6 +97,9 @@ class PTYManagerAdapter:
     def is_alive(self) -> bool:
         return self._manager.is_alive()
 
+    def is_echo_enabled(self) -> bool:
+        return self._manager.is_echo_enabled()
+
     def close(self) -> None:
         self._manager.close()
 

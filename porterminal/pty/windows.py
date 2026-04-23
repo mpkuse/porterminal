@@ -106,6 +106,10 @@ class WindowsPTYBackend:
         """Check if the PTY process is still alive."""
         return self._pty is not None and self._pty.isalive()
 
+    def is_echo_enabled(self) -> bool:
+        """Windows backend does not expose reliable ECHO state."""
+        return False
+
     def close(self) -> None:
         """Close the PTY with grace period before force kill."""
         if self._pty is None:

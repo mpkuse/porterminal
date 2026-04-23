@@ -4,8 +4,9 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,6 +34,7 @@ class ConnectionFlowState:
 
     paused: bool = False
     pause_time: float | None = None
+    echo_suppression: bytearray = field(default_factory=bytearray)
 
 
 # Terminal response sequences that should NOT be written to PTY.
@@ -52,7 +54,7 @@ HEARTBEAT_TIMEOUT = 300  # 5 minutes
 
 # Adaptive PTY read interval: fast when data flowing, slow when idle
 PTY_READ_INTERVAL_MIN = 0.001  # 1ms when data is flowing (high throughput)
-PTY_READ_INTERVAL_MAX = 0.008  # 8ms when idle (save CPU)
+PTY_READ_INTERVAL_MAX = 0.003  # 3ms when idle (keeps remote typing responsive)
 PTY_READ_BURST_THRESHOLD = 5  # Consecutive reads with data before going fast
 
 # Tiered batch intervals: faster for interactive, slower for bulk
@@ -63,6 +65,7 @@ OUTPUT_BATCH_MAX_SIZE = 16384  # Flush if batch exceeds 16KB
 INTERACTIVE_THRESHOLD = 64  # Bytes - flush immediately for very small data
 MAX_INPUT_SIZE = 4096
 FLOW_PAUSE_TIMEOUT = 5.0  # seconds - auto-resume if client stops sending ACKs (was 15s)
+LOCAL_ECHO_MAX_BYTES = 128
 
 
 class AsyncioClock:
@@ -94,6 +97,14 @@ class TerminalService:
         self._session_locks: dict[str, asyncio.Lock] = {}
         # Per-connection flow control state (watermark-based backpressure)
         self._flow_state: dict[ConnectionPort, ConnectionFlowState] = {}
+        self._on_session_exited: Callable[[Session], Awaitable[None]] | None = None
+
+    def set_on_session_exited(
+        self,
+        callback: Callable[[Session], Awaitable[None]],
+    ) -> None:
+        """Set callback invoked when the PTY process exits."""
+        self._on_session_exited = callback
 
     # -------------------------------------------------------------------------
     # Multi-client connection tracking
@@ -128,6 +139,29 @@ class TerminalService:
             del self._session_connections[session_id]
         return count
 
+    def _strip_optimistic_echo(
+        self,
+        connection: ConnectionPort,
+        data: bytes,
+    ) -> bytes:
+        """Remove PTY echo already shown optimistically on this connection."""
+        flow = self._flow_state.get(connection)
+        if not flow or not flow.echo_suppression:
+            return data
+
+        pending = flow.echo_suppression
+        match_len = 0
+        max_match = min(len(data), len(pending))
+        while match_len < max_match and data[match_len] == pending[match_len]:
+            match_len += 1
+
+        if match_len == 0:
+            pending.clear()
+            return data
+
+        del pending[:match_len]
+        return data[match_len:]
+
     async def _send_to_connections(self, connections: list[ConnectionPort], data: bytes) -> None:
         """Send data to connections, respecting flow control.
 
@@ -146,8 +180,12 @@ class TerminalService:
                 else:
                     continue  # Skip paused connection
 
+            output = self._strip_optimistic_echo(conn, data)
+            if not output:
+                continue
+
             try:
-                await conn.send_output(data)
+                await conn.send_output(output)
             except Exception as e:
                 logger.debug("Failed to send output to connection: %s", e)
 
@@ -397,8 +435,11 @@ class TerminalService:
         await flush_batch()
 
         # Notify all clients if PTY died
-        if has_connections() and not session.pty_handle.is_alive():
-            await self._broadcast_output(session_id, b"\r\n[Shell exited]\r\n")
+        if not session.pty_handle.is_alive():
+            if has_connections():
+                await self._broadcast_output(session_id, b"\r\n[Shell exited]\r\n")
+            if self._on_session_exited:
+                await self._on_session_exited(session)
 
     async def _heartbeat_loop(self, connection: ConnectionPort) -> None:
         """Send periodic heartbeat pings."""
@@ -452,6 +493,7 @@ class TerminalService:
             return
 
         if rate_limiter.try_acquire(len(filtered)):
+            await self._optimistic_echo(session, connection, filtered)
             session.pty_handle.write(filtered)
             session.touch(datetime.now(UTC))
         else:
@@ -462,6 +504,27 @@ class TerminalService:
                 }
             )
             logger.warning("Rate limit exceeded session_id=%s", session.id)
+
+    async def _optimistic_echo(
+        self,
+        session: Session[PTYPort],
+        connection: ConnectionPort,
+        data: bytes,
+    ) -> None:
+        """Immediately show safe printable input while waiting for PTY echo."""
+        if len(data) > LOCAL_ECHO_MAX_BYTES:
+            return
+        if not data or any(byte < 0x20 or byte >= 0x7F for byte in data):
+            return
+        if not session.pty_handle.is_echo_enabled():
+            return
+
+        flow = self._flow_state.get(connection)
+        if not flow:
+            return
+
+        flow.echo_suppression.extend(data)
+        await connection.send_output(data)
 
     async def _handle_json_message(
         self,

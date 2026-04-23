@@ -155,6 +155,12 @@ class SecurePTYManager:
             return False
         return self._backend.is_alive()
 
+    def is_echo_enabled(self) -> bool:
+        """Check whether terminal echo is currently enabled."""
+        if self._closed:
+            return False
+        return self._backend.is_echo_enabled()
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         if self._closed:

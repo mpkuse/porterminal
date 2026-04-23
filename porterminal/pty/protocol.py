@@ -79,6 +79,10 @@ class PTYBackend(Protocol):
         """
         ...
 
+    def is_echo_enabled(self) -> bool:
+        """Check if terminal echo is enabled."""
+        ...
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         ...

@@ -15,6 +15,7 @@ import type { EventBus } from '@/core/events';
 import type { ConnectionService } from './ConnectionService';
 import type { ManagementService } from './ManagementService';
 import { applyModifiers } from '@/input/KeyMapper';
+import { getTerminalFontSize } from '@/utils/storage';
 
 export interface TabService {
     /** All tabs */
@@ -44,9 +45,6 @@ export interface TabService {
     /** Focus the active terminal */
     focusTerminal(): void;
 
-    /** Get default shell ID */
-    getDefaultShellId(): string;
-
     /** Enable/disable keyboard input (prevents virtual keyboard on mobile during selection) */
     setKeyboardEnabled(enabled: boolean): void;
 }
@@ -59,12 +57,18 @@ export interface TabService {
 function configureTerminalTextarea(textarea: HTMLTextAreaElement): void {
     textarea.setAttribute('inputmode', 'text');
     textarea.setAttribute('enterkeyhint', 'send');
+    textarea.setAttribute('name', 'terminal-input');
     textarea.setAttribute('role', 'textbox');
     textarea.setAttribute('aria-label', 'Terminal input');
     textarea.setAttribute('aria-multiline', 'false');
+    textarea.setAttribute('aria-autocomplete', 'none');
     textarea.removeAttribute('aria-hidden');
 
-    // Attempt to disable autocomplete/autocorrect (limited effectiveness on iOS)
+    // Best-effort mobile keyboard hints for terminal input.
+    // Android/Gboard usually respects these; iOS may still show suggestions.
+    textarea.autocomplete = 'off';
+    textarea.autocapitalize = 'none';
+    textarea.spellcheck = false;
     textarea.setAttribute('autocomplete', 'off');
     textarea.setAttribute('autocorrect', 'off');
     textarea.setAttribute('autocapitalize', 'none');
@@ -98,6 +102,7 @@ export function createTabService(
     managementService: ManagementService,
     connectionService: ConnectionService,
     modifiers: ModifierState,
+    defaultShellId: string,
     callbacks: {
         onInputSend: (data: string) => void;
         onSelectionCopy: (text: string) => void;
@@ -109,6 +114,7 @@ export function createTabService(
     const voiceTimers = new Map<number, ReturnType<typeof setTimeout>>();  // For cleanup on tab close
     let activeTabId: number | null = null;
     let tabCounter = 0;
+    const desktopQuery = window.matchMedia('(pointer: fine) and (min-width: 768px)');
 
     function getActiveTab(): Tab | null {
         return tabs.find(t => t.id === activeTabId) ?? null;
@@ -128,8 +134,7 @@ export function createTabService(
 
     function renderTabs(): void {
         const tabBar = document.getElementById('tab-bar');
-        const shellSelector = document.getElementById('shell-selector');
-        if (!tabBar || !shellSelector) return;
+        if (!tabBar) return;
 
         // Remove existing tab buttons
         tabBar.querySelectorAll('.tab-btn').forEach(btn => btn.remove());
@@ -148,17 +153,27 @@ export function createTabService(
             if (tabs.length > 1) {
                 const closeBtn = document.createElement('span');
                 closeBtn.className = 'tab-close';
-                closeBtn.textContent = '×';
+                closeBtn.setAttribute('aria-label', 'Hold to close tab');
+                closeBtn.setAttribute('role', 'button');
+                closeBtn.setAttribute('title', 'Hold to close');
 
                 // Hold-to-close: prevents accidental tab closure
                 const HOLD_DURATION_MS = 400;
                 let holdTimer: ReturnType<typeof setTimeout> | null = null;
                 let isClosing = false;
+                let pointerId: number | null = null;
 
-                const startHold = (e: Event) => {
+                const startHold = (e: PointerEvent) => {
                     e.preventDefault();
                     e.stopPropagation();
                     if (isClosing) return;
+
+                    pointerId = e.pointerId;
+                    try {
+                        closeBtn.setPointerCapture(e.pointerId);
+                    } catch {
+                        // Pointer capture can fail if the pointer is already gone.
+                    }
 
                     closeBtn.classList.add('holding');
                     holdTimer = setTimeout(() => {
@@ -169,10 +184,22 @@ export function createTabService(
                     }, HOLD_DURATION_MS);
                 };
 
-                const cancelHold = () => {
+                const cancelHold = (e?: PointerEvent) => {
+                    if (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
                     if (holdTimer) {
                         clearTimeout(holdTimer);
                         holdTimer = null;
+                    }
+                    if (pointerId !== null) {
+                        try {
+                            closeBtn.releasePointerCapture(pointerId);
+                        } catch {
+                            // Ignore stale pointer capture.
+                        }
+                        pointerId = null;
                     }
                     closeBtn.classList.remove('holding');
                 };
@@ -182,17 +209,23 @@ export function createTabService(
                 closeBtn.addEventListener('pointerup', cancelHold);
                 closeBtn.addEventListener('pointercancel', cancelHold);
                 closeBtn.addEventListener('pointerleave', cancelHold);
+                closeBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+                closeBtn.addEventListener('selectstart', (e) => e.preventDefault());
 
                 // Prevent click from switching tabs
                 closeBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
                     e.stopPropagation();
+                    if (desktopQuery.matches) {
+                        service.requestCloseTab(tab.id).catch(console.error);
+                    }
                 });
 
                 tabBtn.appendChild(closeBtn);
             }
 
             tabBtn.addEventListener('click', () => service.switchToTab(tab.id));
-            tabBar.insertBefore(tabBtn, shellSelector);
+            tabBar.appendChild(tabBtn);
         });
 
         // Add tab button - async request
@@ -202,7 +235,7 @@ export function createTabService(
         addBtn.addEventListener('click', () => {
             service.requestCreateTab().catch(console.error);
         });
-        tabBar.insertBefore(addBtn, shellSelector);
+        tabBar.appendChild(addBtn);
     }
 
     /**
@@ -223,7 +256,7 @@ export function createTabService(
         // Create terminal
         const terminal = new Terminal({
             cursorBlink: true,
-            fontSize: 10,
+            fontSize: getTerminalFontSize(),
             fontFamily: 'Menlo, Monaco, Consolas, monospace',
             theme: {
                 background: getCSSVar('--bg-primary', '#1e1e1e'),
@@ -451,7 +484,7 @@ export function createTabService(
         },
 
         async requestCreateTab(shellId?: string): Promise<Tab> {
-            const shell = shellId ?? this.getDefaultShellId();
+            const shell = shellId ?? defaultShellId;
 
             // Request from server
             const serverTab = await managementService.createTab(shell);
@@ -502,12 +535,6 @@ export function createTabService(
             // Show selected
             tab.container.style.display = 'block';
             activeTabId = tabId;
-
-            // Update shell selector
-            const shellSelect = document.getElementById('shell-select') as HTMLSelectElement | null;
-            if (shellSelect) {
-                shellSelect.value = tab.shellId;
-            }
 
             // Focus and fit - use rAF to ensure CSS layout is complete
             // Note: for new tabs, opacity is managed by ConnectionService after buffer flush
@@ -600,11 +627,6 @@ export function createTabService(
             if (tab) {
                 tab.term.focus();
             }
-        },
-
-        getDefaultShellId(): string {
-            const shellSelect = document.getElementById('shell-select') as HTMLSelectElement | null;
-            return shellSelect?.value ?? 'default';
         },
 
         setKeyboardEnabled(enabled: boolean): void {

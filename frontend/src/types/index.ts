@@ -57,11 +57,18 @@ export interface ButtonConfig {
     row?: number;
 }
 
+/** Command snippet from snippets file */
+export interface Snippet {
+    name: string;
+    command: string;
+}
+
 /** App configuration from /api/config */
 export interface AppConfig {
     shells: ShellConfig[];
     default_shell: string;
     buttons?: ButtonConfig[];
+    snippets?: Snippet[];
     compose_mode?: boolean;  // Server default for compose mode
     // Version and update info
     version?: string;

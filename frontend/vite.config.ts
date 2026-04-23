@@ -2,15 +2,23 @@ import { defineConfig, Plugin } from 'vite';
 import { resolve } from 'path';
 import { readdirSync, unlinkSync, existsSync } from 'fs';
 
-/** Clean old app-*.js and app-*.css before build */
-function cleanOldAssets(): Plugin {
+/** Clean stale app-*.js and app-*.css after a successful build. */
+function cleanStaleAssets(): Plugin {
   const assetsDir = resolve(__dirname, '../porterminal/static/assets');
   return {
-    name: 'clean-old-assets',
-    buildStart() {
+    name: 'clean-stale-assets',
+    writeBundle(_options, bundle) {
       if (!existsSync(assetsDir)) return;
+      const emitted = new Set(
+        Object.values(bundle)
+          .map(asset => asset.fileName)
+          .filter(fileName => fileName.startsWith('assets/app-'))
+          .map(fileName => fileName.replace(/^assets\//, '')),
+      );
+
       for (const file of readdirSync(assetsDir)) {
-        if (file.startsWith('app-') && (file.endsWith('.js') || file.endsWith('.css'))) {
+        const isAppAsset = file.startsWith('app-') && (file.endsWith('.js') || file.endsWith('.css'));
+        if (isAppAsset && !emitted.has(file)) {
           unlinkSync(resolve(assetsDir, file));
         }
       }
@@ -21,7 +29,7 @@ function cleanOldAssets(): Plugin {
 export default defineConfig({
   root: '.',
   base: '/static/',
-  plugins: [cleanOldAssets()],
+  plugins: [cleanStaleAssets()],
 
   resolve: {
     alias: {

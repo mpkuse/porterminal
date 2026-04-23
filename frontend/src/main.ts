@@ -46,14 +46,30 @@ import { createConnectionStatus } from '@/ui/ConnectionStatus';
 import { createTextViewOverlay } from '@/ui/TextViewOverlay';
 import { createUpdateOverlay } from '@/ui/UpdateOverlay';
 import { createSettingsOverlay } from '@/ui/SettingsOverlay';
+import { createSnippetsOverlay } from '@/ui/SnippetsOverlay';
 import { renderToolbar } from '@/ui/Toolbar';
+import { showToast } from '@/utils/toast';
 
 // Storage
-import { getSavedPassword, savePassword, clearPassword, getDisabledButtons } from '@/utils/storage';
+import {
+    applyTheme,
+    getDisabledButtons,
+    getLightMode,
+    getDesktopToolbarAutohide,
+    getTerminalFontSize,
+    getSavedPassword,
+    savePassword,
+    clearPassword,
+    setTerminalFontSize,
+    setDesktopToolbarAutohide,
+    clampTerminalFontSize,
+} from '@/utils/storage';
 
 // Types
-import type { AppConfig, ButtonConfig, ButtonSend, SwipeDirection, Tab } from '@/types';
+import type { AppConfig, ButtonSend, SwipeDirection, Tab } from '@/types';
 import type { TabService } from '@/services/TabService';
+
+applyTheme(getLightMode());
 
 /**
  * Perform fitAddon.fit() with scroll-to-bottom preservation.
@@ -77,6 +93,70 @@ function fitWithScrollToBottom(tab: Tab): void {
         disposable.dispose();
         tab.term.scrollToBottom();
     }, 500);
+}
+
+function getCSSVar(name: string, fallback: string): string {
+    const styles = getComputedStyle(document.documentElement);
+    return styles.getPropertyValue(name).trim() || fallback;
+}
+
+function applyTerminalTheme(tab: Tab): void {
+    tab.term.options.theme = {
+        background: getCSSVar('--bg-primary', '#1e1e1e'),
+        foreground: getCSSVar('--text-primary', '#cccccc'),
+        cursor: getCSSVar('--cursor-color', '#aeafad'),
+        cursorAccent: getCSSVar('--bg-primary', '#1e1e1e'),
+        selectionBackground: getCSSVar('--selection-bg', 'rgba(38, 79, 120, 0.5)'),
+        black: getLightMode() ? '#0f172a' : '#000000',
+        red: getLightMode() ? '#b91c1c' : '#cd3131',
+        green: getLightMode() ? '#15803d' : '#0dbc79',
+        yellow: getLightMode() ? '#a16207' : '#e5e510',
+        blue: getLightMode() ? '#1d4ed8' : '#2472c8',
+        magenta: getLightMode() ? '#a21caf' : '#bc3fbc',
+        cyan: getLightMode() ? '#0e7490' : '#11a8cd',
+        white: getLightMode() ? '#334155' : '#e5e5e5',
+        brightBlack: getLightMode() ? '#64748b' : '#666666',
+        brightRed: getLightMode() ? '#dc2626' : '#f14c4c',
+        brightGreen: getLightMode() ? '#16a34a' : '#23d18b',
+        brightYellow: getLightMode() ? '#ca8a04' : '#f5f543',
+        brightBlue: getLightMode() ? '#2563eb' : '#3b8eea',
+        brightMagenta: getLightMode() ? '#c026d3' : '#d670d6',
+        brightCyan: getLightMode() ? '#0891b2' : '#29b8db',
+        brightWhite: getLightMode() ? '#0f172a' : '#e5e5e5',
+    };
+    tab.term.refresh(0, tab.term.rows - 1);
+}
+
+function setupFontSizeControls(tabService: TabService): void {
+    const downBtn = document.getElementById('btn-font-down') as HTMLButtonElement | null;
+    const upBtn = document.getElementById('btn-font-up') as HTMLButtonElement | null;
+    const label = document.getElementById('font-size-label');
+    if (!downBtn || !upBtn) return;
+
+    const updateLabel = (size: number): void => {
+        if (label) {
+            label.textContent = String(size);
+        }
+    };
+
+    const applySize = (nextSize: number): void => {
+        const size = clampTerminalFontSize(nextSize);
+        setTerminalFontSize(size);
+        updateLabel(size);
+
+        for (const tab of tabService.tabs) {
+            tab.term.options.fontSize = size;
+            if (tab.container.style.display !== 'none') {
+                fitWithScrollToBottom(tab);
+            }
+        }
+
+        tabService.focusTerminal();
+    };
+
+    updateLabel(getTerminalFontSize());
+    downBtn.addEventListener('click', () => applySize(getTerminalFontSize() - 1));
+    upBtn.addEventListener('click', () => applySize(getTerminalFontSize() + 1));
 }
 
 // Configuration (heartbeat matches backend HEARTBEAT_INTERVAL = 30s)
@@ -148,25 +228,7 @@ function renderCustomButtons(buttons: AppConfig['buttons']): void {
     }
 }
 
-/**
- * Re-render toolbar buttons after add/remove
- */
-function rerenderToolbarButtons(
-    buttons: ButtonConfig[],
-    inputHandler: ReturnType<typeof createInputHandler>
-): void {
-    const toolbar = document.getElementById('toolbar');
-    if (!toolbar) return;
 
-    // Remove existing custom button rows (row3+)
-    toolbar.querySelectorAll('[id^="toolbar-row"]:not(#toolbar-row1):not(#toolbar-row2)')
-        .forEach(row => row.remove());
-
-    // Render new buttons
-    renderCustomButtons(buttons);
-    applyButtonVisibility();
-    setupToolButtons(inputHandler);
-}
 
 /**
  * Initialize the application
@@ -188,6 +250,7 @@ async function init(): Promise<void> {
     const textViewOverlay = createTextViewOverlay();
     const updateOverlay = createUpdateOverlay();
     const settingsOverlay = createSettingsOverlay();
+    const snippetsOverlay = createSnippetsOverlay();
 
     // Auth state
     let currentPassword = getSavedPassword();
@@ -298,6 +361,7 @@ async function init(): Promise<void> {
         managementService,
         connectionService,
         modifierManager.state,
+        config.default_shell,
         {
             onInputSend: () => {
                 modifierManager.consumeSticky();
@@ -425,36 +489,47 @@ async function init(): Promise<void> {
     // Setup update overlay
     updateOverlay.setup();
 
-    // Populate shell selector
-    const shellSelect = document.getElementById('shell-select') as HTMLSelectElement | null;
-    if (shellSelect) {
-        shellSelect.innerHTML = '';
-        for (const shell of config.shells) {
-            const option = document.createElement('option');
-            option.value = shell.id;
-            option.textContent = shell.name;
-            if (shell.id === config.default_shell) {
-                option.selected = true;
-            }
-            shellSelect.appendChild(option);
-        }
+    // Mutable config reference shared by snippets and settings
+    let currentConfig = config;
 
-        // Handle shell change - close current tab and create new one with new shell
-        shellSelect.addEventListener('change', async () => {
-            const shellId = shellSelect.value;
-            const currentTab = tabService.activeTab;
-            if (shellId && currentTab) {
-                try {
-                    // Create new tab with selected shell first
-                    await tabService.requestCreateTab(shellId);
-                    // Then close the old tab
-                    await tabService.requestCloseTab(currentTab.id);
-                } catch (e) {
-                    console.error('Failed to switch shell:', e);
-                }
+    const openSnippets = (): void => {
+        snippetsOverlay.show(currentConfig.snippets ?? [], currentConfig.buttons ?? []);
+    };
+
+    // Setup snippets overlay
+    snippetsOverlay.setup({
+        onSelect: (command) => {
+            const tab = tabService.activeTab;
+            if (tab) connectionService.sendInput(tab, command);
+        },
+        onAdd: async (name, command) => {
+            const result = await configService.addButton(name, command);
+            if (result.success) {
+                currentConfig = {
+                    ...currentConfig,
+                    buttons: result.buttons ?? currentConfig.buttons ?? [],
+                    snippets: result.snippets ?? currentConfig.snippets ?? [],
+                };
+                openSnippets();
             }
-        });
-    }
+        },
+        onDelete: async (label) => {
+            const result = await configService.removeButton(label);
+            if (result.success) {
+                currentConfig = {
+                    ...currentConfig,
+                    buttons: result.buttons ?? currentConfig.buttons ?? [],
+                    snippets: result.snippets ?? currentConfig.snippets ?? [],
+                };
+                openSnippets();
+            }
+        },
+    });
+    setupSnippetsButton(openSnippets);
+
+    setupFontSizeControls(tabService);
+
+    setupDesktopToolbarAutohide();
 
     // Render custom buttons from config (supports multiple rows)
     renderCustomButtons(config.buttons);
@@ -501,20 +576,15 @@ async function init(): Promise<void> {
     // Setup help button
     setupHelpButton();
 
-    // Mutable config reference for button updates
-    let currentConfig = config;
-
     // Setup settings overlay
     settingsOverlay.setup(configService, managementService, {
         onComposeModeChange: (enabled) => {
             composeInput.setEnabled(enabled);
         },
-        onButtonVisibilityChange: () => {
-            applyButtonVisibility();
-        },
-        onButtonsChanged: (buttons) => {
-            currentConfig = { ...currentConfig, buttons };
-            rerenderToolbarButtons(buttons, inputHandler);
+        onThemeChange: () => {
+            for (const tab of tabService.tabs) {
+                applyTerminalTheme(tab);
+            }
         },
     });
     setupSettingsButton(settingsOverlay, () => currentConfig);
@@ -637,15 +707,16 @@ async function init(): Promise<void> {
             }
         }, 100);
 
-        // Always show version info on startup
-        setTimeout(() => {
-            updateOverlay.show({
-                currentVersion: config.version || 'unknown',
-                latestVersion: config.latest_version || null,
-                upgradeCommand: config.upgrade_command || null,
-                updateAvailable: config.update_available || false,
-            });
-        }, 500);
+        if (config.update_available) {
+            setTimeout(() => {
+                updateOverlay.show({
+                    currentVersion: config.version || 'unknown',
+                    latestVersion: config.latest_version || null,
+                    upgradeCommand: config.upgrade_command || null,
+                    updateAvailable: true,
+                });
+            }, 500);
+        }
     } catch (e) {
         console.error('Failed to connect management WebSocket:', e);
         disconnectOverlay.show();
@@ -911,9 +982,12 @@ function setupShutdownButton(disconnectOverlay: ReturnType<typeof createDisconne
                 if (response.ok) {
                     disconnectOverlay.setText('Server Shutdown');
                     disconnectOverlay.show();
+                } else {
+                    const data = await response.json().catch(() => ({}));
+                    showToast(document.body, 'settings-toast', data.error || `Shutdown failed (${response.status})`, 'error');
                 }
             } catch (e) {
-                console.error('Shutdown failed:', e);
+                showToast(document.body, 'settings-toast', 'Shutdown failed — server unreachable', 'error');
             }
         }
     });
@@ -934,6 +1008,74 @@ function setupHelpButton(): void {
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) hide();
     });
+}
+
+function setupSnippetsButton(openSnippets: () => void): void {
+    setupTapButton('btn-snippets', openSnippets);
+}
+
+function setupDesktopToolbarAutohide(): void {
+    const app = document.getElementById('app');
+    const hoverZone = document.getElementById('top-hover-zone');
+    const topBar = document.getElementById('top-bar');
+    const btn = document.getElementById('btn-toolbar-autohide') as HTMLButtonElement | null;
+    if (!app || !hoverZone || !topBar || !btn) return;
+
+    const desktopQuery = window.matchMedia('(pointer: fine) and (min-width: 768px)');
+    let autohide = getDesktopToolbarAutohide();
+    let revealTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const setRevealed = (revealed: boolean): void => {
+        if (!desktopQuery.matches || !autohide) {
+            app.classList.remove('desktop-toolbar-revealed');
+            return;
+        }
+        app.classList.toggle('desktop-toolbar-revealed', revealed);
+    };
+
+    const scheduleHide = (): void => {
+        if (revealTimer) clearTimeout(revealTimer);
+        revealTimer = setTimeout(() => {
+            if (!topBar.matches(':hover') && !hoverZone.matches(':hover')) {
+                setRevealed(false);
+            }
+        }, 900);
+    };
+
+    const applyState = (): void => {
+        const enabled = desktopQuery.matches && autohide;
+        app.classList.toggle('desktop-toolbar-autohide', enabled);
+        btn.classList.toggle('active', autohide);
+        btn.setAttribute('aria-pressed', autohide ? 'true' : 'false');
+        btn.setAttribute(
+            'aria-label',
+            autohide ? 'Pin desktop top bar' : 'Unpin desktop top bar',
+        );
+        btn.title = autohide
+            ? 'Desktop top bar autohide on. Click to pin.'
+            : 'Desktop top bar pinned. Click to autohide.';
+        if (!enabled) {
+            app.classList.remove('desktop-toolbar-revealed');
+        }
+    };
+
+    btn.addEventListener('click', () => {
+        autohide = !autohide;
+        setDesktopToolbarAutohide(autohide);
+        applyState();
+        if (autohide) {
+            setRevealed(true);
+            scheduleHide();
+        }
+    });
+
+    hoverZone.addEventListener('mouseenter', () => setRevealed(true));
+    hoverZone.addEventListener('mouseleave', scheduleHide);
+    topBar.addEventListener('mouseenter', () => setRevealed(true));
+    topBar.addEventListener('mouseleave', scheduleHide);
+
+    desktopQuery.addEventListener('change', applyState);
+    applyState();
 }
 
 function setupSettingsButton(

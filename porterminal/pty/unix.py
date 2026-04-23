@@ -116,6 +116,16 @@ class UnixPTYBackend:
         except ChildProcessError:
             return False
 
+    def is_echo_enabled(self) -> bool:
+        """Check whether the PTY currently has terminal echo enabled."""
+        if self._master_fd is None:
+            return False
+        try:
+            attrs = termios.tcgetattr(self._master_fd)
+        except termios.error:
+            return False
+        return bool(attrs[3] & termios.ECHO)
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         try:

@@ -2,6 +2,7 @@
 
 import asyncio
 import ctypes
+import json
 import logging
 import os
 import signal
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 
 # Path to static files (inside package)
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _load_snippets_file(path: Path) -> list[dict]:
+    """Load snippets from a JSON file."""
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    snippets = data.get("snippets", [])
+    if not isinstance(snippets, list):
+        raise ValueError("snippets must be a list")
+    return snippets
+
+
+def _save_snippets_file(path: Path, snippets: list[dict]) -> None:
+    """Persist snippets to a JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"snippets": snippets}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def is_admin() -> bool:
@@ -79,10 +98,35 @@ async def lifespan(app: FastAPI):
     async def on_session_destroyed(session_id, user_id):
         closed_tabs = container.tab_service.close_tabs_for_session(session_id)
         for tab in closed_tabs:
-            message = container.tab_service.build_tab_closed_message(tab.tab_id, "session_ended")
+            message = container.tab_service.build_tab_state_update(
+                "remove",
+                tab,
+                reason="session_ended",
+            )
             await container.connection_registry.broadcast(user_id, message)
 
     container.session_service.set_on_session_destroyed(on_session_destroyed)
+
+    # Load snippets from file if specified
+    snippets: list = []
+    snippets_path = os.environ.get("PORTERMINAL_SNIPPETS_PATH")
+    if snippets_path:
+        p = Path(snippets_path)
+        if p.exists():
+            try:
+                snippets = _load_snippets_file(p)
+            except Exception as exc:
+                logger.warning("Failed to load snippets from %s: %s", snippets_path, exc)
+        else:
+            logger.warning("Snippets file not found: %s", snippets_path)
+    app.state.snippets = snippets
+    app.state.snippets_path = snippets_path
+    app.state.snippets_lock = asyncio.Lock()
+
+    async def on_session_exited(session):
+        await container.session_service.destroy_session(session.id)
+
+    container.terminal_service.set_on_session_exited(on_session_exited)
 
     await container.session_service.start()
 
@@ -174,6 +218,7 @@ def create_app() -> FastAPI:
         return {
             "shells": [{"id": s.id, "name": s.name} for s in container.available_shells],
             "buttons": container.buttons,
+            "snippets": getattr(app.state, "snippets", []),
             "default_shell": container.default_shell_id,
             "compose_mode": container.compose_mode_default,
             "version": __version__,
@@ -252,6 +297,32 @@ def create_app() -> FastAPI:
         if not label or not send:
             return JSONResponse({"error": "label and send required"}, status_code=400)
 
+        snippets_path = getattr(app.state, "snippets_path", None)
+        if snippets_path:
+            try:
+                async with app.state.snippets_lock:
+                    path = Path(snippets_path)
+                    snippets = _load_snippets_file(path)
+                    label_norm = str(label).strip()
+                    if not label_norm:
+                        raise ValueError("label cannot be empty")
+                    if any(
+                        str(s.get("name", "")).lower() == label_norm.lower()
+                        for s in snippets
+                    ):
+                        raise ValueError(f"Quick command '{label_norm}' already exists")
+                    snippets.append({"name": label_norm, "command": str(send)})
+                    _save_snippets_file(path, snippets)
+                    app.state.snippets = snippets
+
+                logger.info("Quick command added to %s: %s", snippets_path, label_norm)
+                return {"buttons": container.buttons, "snippets": app.state.snippets}
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                logger.exception("Failed to save quick command to %s", snippets_path)
+                return JSONResponse({"error": str(e)}, status_code=500)
+
         try:
             buttons = await container.config_service.add_button(label, send, row)
             return {"buttons": buttons}
@@ -262,6 +333,25 @@ def create_app() -> FastAPI:
     async def remove_button(label: str):
         """Remove a button by label."""
         container: Container = app.state.container
+        snippets_path = getattr(app.state, "snippets_path", None)
+        if snippets_path:
+            try:
+                async with app.state.snippets_lock:
+                    path = Path(snippets_path)
+                    snippets = _load_snippets_file(path)
+                    new_snippets = [
+                        s for s in snippets
+                        if str(s.get("name", "")).lower() != label.lower()
+                    ]
+                    if len(new_snippets) != len(snippets):
+                        _save_snippets_file(path, new_snippets)
+                        app.state.snippets = new_snippets
+                        logger.info("Quick command removed from %s: %s", snippets_path, label)
+                        return {"buttons": container.buttons, "snippets": app.state.snippets}
+            except Exception as e:
+                logger.exception("Failed to remove quick command from %s", snippets_path)
+                return JSONResponse({"error": str(e)}, status_code=500)
+
         try:
             buttons = await container.config_service.remove_button(label)
             return {"buttons": buttons}
@@ -358,28 +448,37 @@ def create_app() -> FastAPI:
         - Localhost (direct access)
         - Cloudflare Tunnel (cf-ray header present)
         - Cloudflare Access authenticated users
+        - Any source when PORTERMINAL_ALLOW_SHUTDOWN=1 (set by run-local.sh)
         """
-        # Check if request is from localhost
-        client_host = request.client.host if request.client else None
-        is_localhost = client_host in ("127.0.0.1", "::1", "localhost")
+        # Allow unconditionally when running in local/trusted mode
+        allow_unconditionally = os.environ.get("PORTERMINAL_ALLOW_SHUTDOWN") == "1"
 
-        # Check for Cloudflare Tunnel (has cf-ray header)
-        is_cloudflare_tunnel = request.headers.get("cf-ray") is not None
+        if not allow_unconditionally:
+            # Check if request is from localhost
+            client_host = request.client.host if request.client else None
+            is_localhost = client_host in ("127.0.0.1", "::1", "localhost")
 
-        # Check for Cloudflare Access authentication
-        cf_user = request.headers.get("cf-access-authenticated-user-email")
+            # Check for Cloudflare Tunnel (has cf-ray header)
+            is_cloudflare_tunnel = request.headers.get("cf-ray") is not None
 
-        if not is_localhost and not is_cloudflare_tunnel and not cf_user:
-            logger.warning(
-                "Unauthorized shutdown attempt from %s",
-                client_host,
-            )
-            return JSONResponse(
-                {"error": "Unauthorized - must be localhost or via Cloudflare Tunnel"},
-                status_code=403,
-            )
+            # Check for Cloudflare Access authentication
+            cf_user = request.headers.get("cf-access-authenticated-user-email")
 
-        source = cf_user or ("tunnel" if is_cloudflare_tunnel else client_host)
+            if not is_localhost and not is_cloudflare_tunnel and not cf_user:
+                client_host = request.client.host if request.client else None
+                logger.warning(
+                    "Unauthorized shutdown attempt from %s",
+                    client_host,
+                )
+                return JSONResponse(
+                    {"error": "Unauthorized - must be localhost or via Cloudflare Tunnel"},
+                    status_code=403,
+                )
+
+            source = cf_user or ("tunnel" if is_cloudflare_tunnel else client_host)
+        else:
+            source = "local"
+
         logger.info("Shutdown requested via API by %s", source)
 
         # Send response before shutting down
@@ -518,7 +617,11 @@ def create_app() -> FastAPI:
                 await connection_registry.register(user_id, connection)
                 await connection_registry.broadcast(
                     user_id,
-                    tab_service.build_tab_closed_message(tab_id, "session_ended"),
+                    tab_service.build_tab_state_update(
+                        "remove",
+                        closed_tab,
+                        reason="session_ended",
+                    ),
                 )
                 await connection_registry.unregister(user_id, connection)
             await websocket.close(code=4005, reason="Session ended")

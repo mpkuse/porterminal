@@ -33,17 +33,29 @@ export function createComposeInput(options: ComposeInputOptions = {}): ComposeIn
     const textarea = document.getElementById('compose-textarea') as HTMLTextAreaElement | null;
     const placeholder = document.getElementById('compose-placeholder');
     const sendBtn = document.getElementById('compose-send');
+    const closeBtn = document.getElementById('compose-close');
     const toggleBtn = document.getElementById('btn-compose');
+    const mobileQuery = window.matchMedia('(pointer: coarse), (max-width: 767px)');
 
     // Priority: localStorage preference > server default > false
     const localPref = getComposeMode();
     let enabled = localPref !== null ? localPref : (options.serverDefault ?? false);
     let onSendCallback: ((text: string) => void) | null = null;
 
+    function isAvailable(): boolean {
+        return mobileQuery.matches;
+    }
+
+    function isActive(): boolean {
+        return enabled && isAvailable();
+    }
+
     function updateUI(): void {
         if (!container || !toggleBtn) return;
-        container.classList.toggle('hidden', !enabled);
-        toggleBtn.classList.toggle('active', enabled);
+        const active = isActive();
+        container.classList.toggle('hidden', !active);
+        toggleBtn.classList.toggle('active', active);
+        document.body.classList.toggle('compose-open', active);
     }
 
     function updatePlaceholder(): void {
@@ -87,7 +99,7 @@ export function createComposeInput(options: ComposeInputOptions = {}): ComposeIn
     }
 
     return {
-        isEnabled: () => enabled,
+        isEnabled: () => isActive(),
 
         setEnabled(value: boolean): void {
             setEnabled(value, true); // fromExternal = true, don't trigger callback
@@ -96,6 +108,8 @@ export function createComposeInput(options: ComposeInputOptions = {}): ComposeIn
         setup(onSend): void {
             onSendCallback = onSend;
             updateUI();
+
+            mobileQuery.addEventListener('change', updateUI);
 
             // Stop events from bubbling to terminal handlers
             container?.addEventListener('pointerdown', (e) => e.stopPropagation(), { passive: true });
@@ -133,6 +147,7 @@ export function createComposeInput(options: ComposeInputOptions = {}): ComposeIn
 
             if (toggleBtn) onTap(toggleBtn, () => setEnabled(!enabled));
             if (sendBtn) onTap(sendBtn, handleSend);
+            if (closeBtn) onTap(closeBtn, () => setEnabled(false));
         },
     };
 }

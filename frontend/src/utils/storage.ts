@@ -43,6 +43,9 @@ export function clearPassword(): void {
 // ========== Compose Mode Storage ==========
 
 const COMPOSE_MODE_KEY = 'ptn_compose_mode';
+const LIGHT_MODE_KEY = 'ptn_light_mode';
+const TERMINAL_FONT_SIZE_KEY = 'ptn_terminal_font_size';
+const DESKTOP_TOOLBAR_AUTOHIDE_KEY = 'ptn_desktop_toolbar_autohide';
 
 /**
  * Check if user has explicitly set a compose mode preference.
@@ -74,6 +77,80 @@ export function setComposeMode(enabled: boolean): void {
     try {
         // Always store the explicit value so user preference takes precedence
         localStorage.setItem(COMPOSE_MODE_KEY, enabled ? 'true' : 'false');
+    } catch {
+        // Ignore errors
+    }
+}
+
+// ========== Theme Storage ==========
+
+export function getLightMode(): boolean {
+    try {
+        return localStorage.getItem(LIGHT_MODE_KEY) === 'true';
+    } catch {
+        return false;
+    }
+}
+
+export function setLightMode(enabled: boolean): void {
+    try {
+        localStorage.setItem(LIGHT_MODE_KEY, enabled ? 'true' : 'false');
+    } catch {
+        // Ignore errors
+    }
+}
+
+export function applyTheme(lightMode: boolean): void {
+    document.documentElement.dataset.theme = lightMode ? 'light' : 'dark';
+}
+
+// ========== Terminal Font Size Storage ==========
+
+export const DEFAULT_TERMINAL_FONT_SIZE = 10;
+export const MIN_TERMINAL_FONT_SIZE = 7;
+export const MAX_TERMINAL_FONT_SIZE = 20;
+
+export function clampTerminalFontSize(size: number): number {
+    return Math.max(MIN_TERMINAL_FONT_SIZE, Math.min(MAX_TERMINAL_FONT_SIZE, size));
+}
+
+export function getTerminalFontSize(): number {
+    try {
+        const value = Number(localStorage.getItem(TERMINAL_FONT_SIZE_KEY));
+        if (Number.isFinite(value)) {
+            return clampTerminalFontSize(value);
+        }
+    } catch {
+        // Ignore errors
+    }
+    return DEFAULT_TERMINAL_FONT_SIZE;
+}
+
+export function setTerminalFontSize(size: number): void {
+    try {
+        localStorage.setItem(
+            TERMINAL_FONT_SIZE_KEY,
+            String(clampTerminalFontSize(size)),
+        );
+    } catch {
+        // Ignore errors
+    }
+}
+
+// ========== Desktop Toolbar Storage ==========
+
+export function getDesktopToolbarAutohide(): boolean {
+    try {
+        const value = localStorage.getItem(DESKTOP_TOOLBAR_AUTOHIDE_KEY);
+        return value === null ? true : value === 'true';
+    } catch {
+        return true;
+    }
+}
+
+export function setDesktopToolbarAutohide(enabled: boolean): void {
+    try {
+        localStorage.setItem(DESKTOP_TOOLBAR_AUTOHIDE_KEY, enabled ? 'true' : 'false');
     } catch {
         // Ignore errors
     }

@@ -16,22 +16,40 @@
 
     <!-- Icons (PWA disabled - not useful for tunnel-based access) -->
     <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
-  <script type="module" crossorigin src="/static/assets/app-BLXfMcUG.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/assets/app-D-hntTUl.css">
+  <script type="module" crossorigin src="/static/assets/app-BuJZDmmi.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/assets/app-BMEwbfbp.css">
 </head>
 <body>
     <div id="app">
-        <!-- Tab Bar with Shell Selector -->
-        <div id="tab-bar">
-            <span id="connection-dot"></span>
-            <button id="btn-textview" title="Plain Text View">TXT</button>
-            <!-- Tabs rendered by JS -->
-            <div id="shell-selector">
-                <select id="shell-select"><option>...</option></select>
+        <div id="top-hover-zone"></div>
+
+        <!-- Tab Bar with terminal controls -->
+        <div id="top-bar">
+            <div id="tab-bar">
+                <span id="connection-dot"></span>
+                <button id="btn-textview" title="Plain Text View">TXT</button>
+                <!-- Tabs rendered by JS -->
+            </div>
+            <div id="top-controls">
+                <button id="btn-font-down" title="Smaller text">A−</button>
+                <button id="btn-font-up" title="Larger text">A+</button>
+                <button id="btn-toolbar-autohide" title="Pin desktop top bar" aria-label="Pin desktop top bar">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M9 3h6"/>
+                        <path d="M10 3v6l-3 3v1h10v-1l-3-3V3"/>
+                        <path d="M12 13v8"/>
+                    </svg>
+                </button>
+                <button id="btn-snippets" title="Quick Commands">⚡</button>
                 <button id="btn-compose" title="Compose Mode">▤</button>
-                <button id="btn-settings" title="Settings">☰</button>
-                <button id="btn-info" title="Help">ⓘ</button>
-                <button id="btn-shutdown" title="Shutdown">⏻</button>
+                <button id="btn-settings" title="Settings">⚙</button>
+                <button id="btn-info" title="Gestures &amp; Help">?</button>
+                <button id="btn-shutdown" title="Shutdown">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <path d="M7.5 6A8.5 8.5 0 1 0 16.5 6"/>
+                        <line x1="12" y1="2.5" x2="12" y2="12"/>
+                    </svg>
+                </button>
             </div>
         </div>
 
@@ -42,6 +60,10 @@
 
         <!-- Compose Input (hidden by default) -->
         <div id="compose-container" class="hidden">
+            <div id="compose-header">
+                <span id="compose-title">Compose</span>
+                <button id="compose-close" title="Close compose mode">×</button>
+            </div>
             <div id="compose-wrapper">
                 <textarea id="compose-textarea" rows="1"></textarea>
                 <span id="compose-placeholder" class="rainbow-text">Compose...</span>
@@ -87,13 +109,14 @@
     <div id="help-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="help-header">
         <div id="help-content">
             <button id="help-close" aria-label="Close">×</button>
-            <div id="help-header">Gestures</div>
+            <div id="help-header">Help</div>
             <div id="help-body">
                 <div class="help-section">
+                    <div class="help-title">Gestures</div>
                     <div class="help-item"><span class="help-key">Swipe ← / →</span> History up/down</div>
                     <div class="help-item"><span class="help-key">Long press</span> Start selection</div>
                     <div class="help-item"><span class="help-key">Double tap</span> Select word</div>
-                    <div class="help-item"><span class="help-key">Pinch</span> Zoom</div>
+                    <div class="help-item"><span class="help-key">Pinch</span> Zoom font size</div>
                 </div>
                 <div class="help-section">
                     <div class="help-title">Modifiers (Ctl, Alt, Sft)</div>
@@ -106,8 +129,16 @@
                     <div class="help-item"><span class="help-key">➤</span> Send text (or Enter if empty)</div>
                 </div>
                 <div class="help-section">
-                    <div class="help-title">Other</div>
+                    <div class="help-title">Toolbar</div>
+                    <div class="help-item"><span class="help-key">A− / A+</span> Decrease / increase font size</div>
+                    <div class="help-item"><span class="help-key">⚡</span> Quick Commands — tap to send, long-press to copy</div>
                     <div class="help-item"><span class="help-key">TXT</span> Plain text view</div>
+                    <div class="help-item"><span class="help-key">⚙</span> Settings</div>
+                    <div class="help-item"><span class="help-key">⏻</span> Shutdown server</div>
+                </div>
+                <div class="help-section">
+                    <div class="help-title">Tabs</div>
+                    <div class="help-item"><span class="help-key">＋</span> New tab</div>
                     <div class="help-item"><span class="help-key">Hold ×</span> Close tab</div>
                 </div>
             </div>
@@ -123,7 +154,7 @@
                 <!-- General Section -->
                 <div class="settings-section">
                     <div class="settings-section-title">General</div>
-                    <div class="settings-item">
+                    <div class="settings-item" id="settings-compose-item">
                         <label class="settings-label" for="settings-compose">
                             <span class="settings-text">Compose Mode</span>
                         </label>
@@ -138,6 +169,15 @@
                         </label>
                         <label class="toggle-switch">
                             <input type="checkbox" id="settings-updates" role="switch">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-item">
+                        <label class="settings-label" for="settings-light-mode">
+                            <span class="settings-text">Light Mode</span>
+                        </label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="settings-light-mode" role="switch">
                             <span class="toggle-slider"></span>
                         </label>
                     </div>
@@ -185,11 +225,6 @@
                         </label>
                     </div>
                 </div>
-                <!-- Buttons Section (dynamic) -->
-                <div class="settings-section" id="settings-buttons-section">
-                    <div class="settings-section-title">Quick Buttons</div>
-                    <!-- Populated by JS -->
-                </div>
             </div>
         </div>
     </div>
@@ -218,6 +253,36 @@
                 <input type="password" id="auth-password" name="password" placeholder="Enter password" autocomplete="current-password">
                 <button type="submit" id="auth-submit">Connect</button>
             </form>
+        </div>
+    </div>
+
+    <!-- Snippets / Quick Commands Popup -->
+    <div id="snippets-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="snippets-header">
+        <div id="snippets-content">
+            <div id="snippets-header-row">
+                <div id="snippets-header">Quick Commands</div>
+                <div id="snippets-header-actions">
+                    <button id="snippets-add-toggle" title="Add command">+</button>
+                    <button id="snippets-close" aria-label="Close">×</button>
+                </div>
+            </div>
+            <!-- Add form (hidden by default) -->
+            <div id="snippets-add-form" class="hidden">
+                <input id="snippets-add-name" type="text" placeholder="Name" maxlength="60" autocomplete="off">
+                <input id="snippets-add-command" type="text" placeholder="Command" autocomplete="off">
+                <button id="snippets-add-submit" title="Add">↵</button>
+            </div>
+            <!-- Command list -->
+            <div id="snippets-list"></div>
+            <!-- Long-press detail panel -->
+            <div id="snippets-detail" class="hidden">
+                <div id="snippets-detail-name"></div>
+                <pre id="snippets-detail-command"></pre>
+                <div id="snippets-detail-actions">
+                    <button id="snippets-detail-copy">Copy</button>
+                    <button id="snippets-detail-close">Done</button>
+                </div>
+            </div>
         </div>
     </div>
 
