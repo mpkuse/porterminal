@@ -4,6 +4,30 @@
   </a>
 </p>
 
+## Personal Fork Notes
+
+This fork is tuned for how I actually use Porterminal on my own machines.
+
+My main use case is simple: start the terminal on a laptop at home, expose it only inside my Tailscale tailnet, and reconnect from my phone or another laptop without dealing with public tunnels, SSH setup, or per-device configuration drift. I wanted one repo I could clone on any machine, run a helper script, and get the same UI, snippets, and local workflow everywhere.
+
+### My Tailscale-First Flow
+
+```bash
+./run-local.sh --snippets .ptn/snippets.json
+```
+
+What this does in this fork:
+
+- runs Porterminal locally with `--no-tunnel`
+- uses `.ptn/run-local.yaml` for my local config
+- loads quick commands from `.ptn/snippets.json`
+- tries `tailscale serve` so the terminal is reachable from other devices on my tailnet
+- prints a Tailscale URL and QR code when available
+
+If `tailscale serve` is unavailable or fails, it still runs locally on `http://127.0.0.1:3444`.
+
+The upstream project README continues below and still explains the original project well.
+
 <p align="center">
   <a href="https://pypi.org/project/ptn/"><img src="https://img.shields.io/pypi/v/ptn?style=flat-square&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <a href="https://pypi.org/project/ptn/"><img src="https://img.shields.io/pypi/pyversions/ptn?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
