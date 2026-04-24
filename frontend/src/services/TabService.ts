@@ -95,6 +95,26 @@ function getCSSVar(name: string, fallback: string): string {
 }
 
 /**
+ * Let browser-reserved shortcuts bypass terminal key handling.
+ * Without this, xterm forwards keys like F11 as terminal escape sequences.
+ */
+function shouldLetBrowserHandleKey(event: KeyboardEvent): boolean {
+    if (event.key === 'F11') {
+        return true;
+    }
+
+    if (event.key === 'F12') {
+        return true;
+    }
+
+    if (event.ctrlKey && event.shiftKey && ['I', 'J', 'C'].includes(event.key.toUpperCase())) {
+        return true;
+    }
+
+    return false;
+}
+
+/**
  * Create a tab service instance (backend-driven)
  */
 export function createTabService(
@@ -299,6 +319,7 @@ export function createTabService(
         terminal.loadAddon(webLinksAddon);
 
         terminal.open(container);
+        terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => !shouldLetBrowserHandleKey(event));
 
         // Configure textarea for mobile (iOS-specific handlers added after tab creation)
         const textarea = container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;

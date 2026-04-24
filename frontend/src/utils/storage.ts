@@ -3,6 +3,7 @@
  */
 
 const STORAGE_PREFIX = 'ptn_auth_';
+const CLIENT_TAB_ID_KEY = 'ptn_client_tab_id';
 
 function getStorageKey(): string {
     // Simple hash of origin for uniqueness across different tunnel URLs
@@ -37,6 +38,33 @@ export function clearPassword(): void {
         localStorage.removeItem(getStorageKey());
     } catch {
         // Ignore errors
+    }
+}
+
+function generateClientTabId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+
+    return `tab_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/**
+ * Get a stable ID for the current browser tab.
+ * Uses sessionStorage so reloads keep the same workspace, while a new tab gets a new one.
+ */
+export function getClientTabId(): string {
+    try {
+        const existing = sessionStorage.getItem(CLIENT_TAB_ID_KEY);
+        if (existing) {
+            return existing;
+        }
+
+        const generated = generateClientTabId();
+        sessionStorage.setItem(CLIENT_TAB_ID_KEY, generated);
+        return generated;
+    } catch {
+        return generateClientTabId();
     }
 }
 

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Path to static files (inside package)
 STATIC_DIR = Path(__file__).parent / "static"
+BROWSER_TAB_SCOPE_SEPARATOR = "::tab:"
 
 
 def _load_snippets_file(path: Path) -> list[dict]:
@@ -45,6 +46,31 @@ def _save_snippets_file(path: Path, snippets: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"snippets": snippets}
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _build_scoped_user_id(raw_user_id: str, client_id: str | None) -> UserId:
+    """Scope a user to a browser tab when the frontend provides a client_id."""
+    base_user_id = raw_user_id or "local-user"
+    normalized_client_id = (client_id or "").strip()
+    if not normalized_client_id:
+        return UserId(base_user_id)
+    return UserId(f"{base_user_id}{BROWSER_TAB_SCOPE_SEPARATOR}{normalized_client_id}")
+
+
+def _get_request_user_id(request: Request) -> UserId:
+    """Get effective user ID for HTTP requests."""
+    return _build_scoped_user_id(
+        request.headers.get("cf-access-authenticated-user-email", "local-user"),
+        request.query_params.get("client_id"),
+    )
+
+
+def _get_websocket_user_id(websocket: WebSocket, client_id: str | None) -> UserId:
+    """Get effective user ID for WebSocket requests."""
+    return _build_scoped_user_id(
+        websocket.headers.get("cf-access-authenticated-user-email", "local-user"),
+        client_id,
+    )
 
 
 def is_admin() -> bool:
@@ -198,7 +224,7 @@ def create_app() -> FastAPI:
     async def list_tabs(request: Request):
         """List all tabs for the current user."""
         container: Container = app.state.container
-        user_id = UserId(request.headers.get("cf-access-authenticated-user-email", "local-user"))
+        user_id = _get_request_user_id(request)
         tabs = container.tab_service.get_user_tabs(user_id)
         return {
             "tabs": [tab.to_dict() for tab in tabs],
@@ -487,7 +513,10 @@ def create_app() -> FastAPI:
         return {"status": "ok", "message": "Server shutting down..."}
 
     @app.websocket("/ws/management")
-    async def websocket_management(websocket: WebSocket):
+    async def websocket_management(
+        websocket: WebSocket,
+        client_id: str | None = Query(None),
+    ):
         """Management WebSocket for tab operations and state sync.
 
         This is the control plane for tab management. Clients send requests
@@ -500,7 +529,7 @@ def create_app() -> FastAPI:
         connection_registry = container.connection_registry
 
         # Get user ID from headers (Cloudflare Access)
-        user_id = UserId(websocket.headers.get("cf-access-authenticated-user-email", "local-user"))
+        user_id = _get_websocket_user_id(websocket, client_id)
         connection = FastAPIWebSocketAdapter(websocket)
 
         logger.info(
@@ -559,6 +588,7 @@ def create_app() -> FastAPI:
         websocket: WebSocket,
         skip_buffer: str | None = Query(None),
         tab_id: str | None = Query(None),
+        client_id: str | None = Query(None),
     ):
         """WebSocket endpoint for terminal I/O only.
 
@@ -580,7 +610,7 @@ def create_app() -> FastAPI:
         connection_registry = container.connection_registry
 
         # Get user ID from headers (Cloudflare Access)
-        user_id = UserId(websocket.headers.get("cf-access-authenticated-user-email", "local-user"))
+        user_id = _get_websocket_user_id(websocket, client_id)
 
         # Validate tab_id is provided
         if not tab_id:

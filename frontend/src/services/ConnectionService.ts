@@ -13,6 +13,7 @@
 
 import type { Tab, ConnectionState } from '@/types';
 import type { EventBus } from '@/core/events';
+import { getClientTabId } from '@/utils/storage';
 
 export interface ConnectionConfig {
     maxReconnectAttempts: number;
@@ -351,7 +352,10 @@ export function createConnectionService(
 
     function buildWebSocketUrl(tabId: string, skipBuffer?: boolean): string {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const params = new URLSearchParams({ tab_id: tabId });
+        const params = new URLSearchParams({
+            tab_id: tabId,
+            client_id: getClientTabId(),
+        });
         if (skipBuffer) {
             params.set('skip_buffer', '1');
         }
