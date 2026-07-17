@@ -67,6 +67,9 @@ htmlcov/
 # Local config override
 config.local.yaml
 
+# dev_stack-managed runtime config (regenerated on start; holds a password hash)
+.ptn/run-on-localhost.yaml
+
 # Build cache
 porterminal/static/.vite/
 

@@ -8,23 +8,39 @@
 
 This fork is tuned for how I actually use Porterminal on my own machines.
 
-My main use case is simple: start the terminal on a laptop at home, expose it only inside my Tailscale tailnet, and reconnect from my phone or another laptop without dealing with public tunnels, SSH setup, or per-device configuration drift. I wanted one repo I could clone on any machine, run a helper script, and get the same UI, snippets, and local workflow everywhere.
+In this fork Porterminal is a **localhost-only app**. It never opens a public Cloudflare
+tunnel, and it no longer manages any Tailscale exposure itself. Reaching the terminal from
+other devices (over my tailnet) is handled entirely by `dev_stack`, so this repo stays a
+plain local service with one job: run the terminal on localhost.
 
-### My Tailscale-First Flow
+### Running locally
 
 ```bash
-./run-local.sh --snippets .ptn/snippets.json
+./run_on_localhost.sh
 ```
 
 What this does in this fork:
 
-- runs Porterminal locally with `--no-tunnel`
-- uses `.ptn/run-local.yaml` for my local config
-- loads quick commands from `.ptn/snippets.json`
-- tries `tailscale serve` so the terminal is reachable from other devices on my tailnet
-- prints a Tailscale URL and QR code when available
+- runs Porterminal with `--no-tunnel` (localhost only, no Cloudflare tunnel, no Tailscale)
+- uses `.ptn/run-on-localhost.yaml` for local config (default bind `127.0.0.1`)
+- optional `-p/--password` to require a one-time password, `--host`/`--port` to override the
+  bind address, and `--snippets PATH` for Quick Commands
 
-If `tailscale serve` is unavailable or fails, it still runs locally on `http://127.0.0.1:3444`.
+### Tailnet access via dev_stack
+
+Exposure on my tailnet and the full start/stop lifecycle live in `~/.bin/dev_stack`:
+
+```bash
+dev_stack porterminal start     # start + publish on the tailnet via Tailscale Serve
+dev_stack porterminal status
+dev_stack porterminal stop
+dev_stack porterminal restart
+dev_stack porterminal clean
+```
+
+`dev_stack` drives `run_on_localhost.sh` with `.ptn/run-on-localhost.yaml`, owns the port,
+password, snippets, and state, and publishes the app on the tailnet at
+`https://<tailnet-host>/`. Pass `--tailscale-no-serve` to keep an instance localhost-only.
 
 The upstream project README continues below and still explains the original project well.
 

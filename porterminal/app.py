@@ -474,7 +474,7 @@ def create_app() -> FastAPI:
         - Localhost (direct access)
         - Cloudflare Tunnel (cf-ray header present)
         - Cloudflare Access authenticated users
-        - Any source when PORTERMINAL_ALLOW_SHUTDOWN=1 (set by run-local.sh)
+        - Any source when PORTERMINAL_ALLOW_SHUTDOWN=1 (set by run_on_localhost.sh)
         """
         # Allow unconditionally when running in local/trusted mode
         allow_unconditionally = os.environ.get("PORTERMINAL_ALLOW_SHUTDOWN") == "1"
