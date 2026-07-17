@@ -83,6 +83,10 @@ class PTYBackend(Protocol):
         """Check if terminal echo is enabled."""
         ...
 
+    def get_working_directory(self) -> str | None:
+        """Return the shell process working directory when available."""
+        ...
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         ...

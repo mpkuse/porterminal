@@ -78,6 +78,7 @@ class SessionService:
         user_id: UserId,
         shell: ShellCommand,
         dimensions: TerminalDimensions,
+        working_directory: str | None = None,
     ) -> Session[PTYPort]:
         """Create a new terminal session.
 
@@ -85,6 +86,7 @@ class SessionService:
             user_id: User requesting the session.
             shell: Shell command to run.
             dimensions: Initial terminal dimensions.
+            working_directory: Optional per-session directory override.
 
         Returns:
             Created session.
@@ -102,7 +104,8 @@ class SessionService:
             raise ValueError(limit_result.reason)
 
         # Create PTY (environment sanitization handled by PTY layer)
-        pty = self._pty_factory(shell, dimensions, self._cwd)
+        effective_cwd = working_directory if working_directory is not None else self._cwd
+        pty = self._pty_factory(shell, dimensions, effective_cwd)
 
         # Create session (starts with 0 clients, caller adds via add_client())
         now = datetime.now(UTC)

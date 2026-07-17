@@ -506,9 +506,10 @@ export function createTabService(
 
         async requestCreateTab(shellId?: string): Promise<Tab> {
             const shell = shellId ?? defaultShellId;
+            const sourceTabId = getActiveTab()?.tabId ?? undefined;
 
             // Request from server
-            const serverTab = await managementService.createTab(shell);
+            const serverTab = await managementService.createTab(shell, sourceTabId);
 
             // Server confirmed - create local rendering
             const tab = createLocalRender(serverTab);

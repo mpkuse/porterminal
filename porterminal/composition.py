@@ -100,6 +100,9 @@ class PTYManagerAdapter:
     def is_echo_enabled(self) -> bool:
         return self._manager.is_echo_enabled()
 
+    def get_working_directory(self) -> str | None:
+        return self._manager.get_working_directory()
+
     def close(self) -> None:
         self._manager.close()
 

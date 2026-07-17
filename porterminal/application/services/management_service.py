@@ -90,6 +90,7 @@ class ManagementService:
         """Handle tab creation request."""
         request_id = message.get("request_id", "")
         shell_id = message.get("shell_id")
+        source_tab_id = message.get("source_tab_id")
 
         try:
             # Get shell
@@ -100,11 +101,22 @@ class ManagementService:
                 )
                 return
 
+            # Resolve the active tab's directory from server-owned PTY state.
+            # Never accept a filesystem path directly from the browser.
+            working_directory = None
+            if source_tab_id:
+                source_tab = self._tab_service.get_tab(source_tab_id)
+                if source_tab and source_tab.user_id == user_id:
+                    source_session = self._session_service.get_session(str(source_tab.session_id))
+                    if source_session and source_session.user_id == user_id:
+                        working_directory = source_session.pty_handle.get_working_directory()
+
             # Create session
             session = await self._session_service.create_session(
                 user_id=user_id,
                 shell=shell,
                 dimensions=self._default_dims,
+                working_directory=working_directory,
             )
             session.add_client()
 

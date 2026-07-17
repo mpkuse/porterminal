@@ -26,6 +26,9 @@ class ExitOnReadPTY:
     def is_echo_enabled(self) -> bool:
         return True
 
+    def get_working_directory(self) -> str | None:
+        return None
+
     def close(self) -> None:
         self._alive = False
 

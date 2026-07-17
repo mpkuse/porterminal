@@ -26,6 +26,7 @@ class WindowsPTYBackend:
         self._pty: Any | None = None
         self._rows: int = 30
         self._cols: int = 120
+        self._cwd: str | None = None
 
     @property
     def rows(self) -> int:
@@ -51,6 +52,7 @@ class WindowsPTYBackend:
 
         self._rows = rows
         self._cols = cols
+        self._cwd = cwd
 
         self._pty = WinPtyProcess.spawn(
             cmd,
@@ -110,6 +112,10 @@ class WindowsPTYBackend:
         """Windows backend does not expose reliable ECHO state."""
         return False
 
+    def get_working_directory(self) -> str | None:
+        """Return the initial directory; pywinpty cannot inspect later changes."""
+        return self._cwd
+
     def close(self) -> None:
         """Close the PTY with grace period before force kill."""
         if self._pty is None:
@@ -132,4 +138,5 @@ class WindowsPTYBackend:
             logger.error("PTY close error: %s", e)
         finally:
             self._pty = None
+            self._cwd = None
             logger.info("Windows PTY closed")

@@ -23,7 +23,7 @@ export interface ManagementService {
     disconnect(): void;
 
     /** Request tab creation (returns Promise that resolves when server confirms) */
-    createTab(shellId: string): Promise<ServerTab>;
+    createTab(shellId: string, sourceTabId?: string): Promise<ServerTab>;
 
     /** Request tab close */
     closeTab(tabId: string): Promise<void>;
@@ -264,8 +264,11 @@ export function createManagementService(
             }
         },
 
-        createTab(shellId: string): Promise<ServerTab> {
-            return sendRequest<ServerTab>('create_tab', { shell_id: shellId });
+        createTab(shellId: string, sourceTabId?: string): Promise<ServerTab> {
+            return sendRequest<ServerTab>('create_tab', {
+                shell_id: shellId,
+                source_tab_id: sourceTabId,
+            });
         },
 
         closeTab(tabId: string): Promise<void> {

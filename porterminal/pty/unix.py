@@ -126,6 +126,16 @@ class UnixPTYBackend:
             return False
         return bool(attrs[3] & termios.ECHO)
 
+    def get_working_directory(self) -> str | None:
+        """Read the shell process working directory from procfs when available."""
+        if self._pid is None:
+            return None
+        try:
+            return os.readlink(f"/proc/{self._pid}/cwd")
+        except OSError:
+            # procfs is not available on every Unix platform (for example macOS).
+            return None
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         try:
