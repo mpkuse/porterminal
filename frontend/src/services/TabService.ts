@@ -115,6 +115,92 @@ function shouldLetBrowserHandleKey(event: KeyboardEvent): boolean {
 }
 
 /**
+ * Bind an action that works for both direct touch input and mouse clicks.
+ *
+ * The app disables native touch handling so the terminal can own its gestures.
+ * On mobile browsers that can also suppress the synthetic click normally emitted
+ * after a tap, so controls in the tab bar must handle pointerup directly.
+ */
+let lastDirectTouchActionAt = 0;
+
+function bindTapAction(
+    element: HTMLElement,
+    onAction: () => void,
+    ignoreSelector?: string,
+): void {
+    const TAP_MOVE_TOLERANCE = 10;
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+
+    const shouldIgnore = (target: EventTarget | null): boolean => {
+        return Boolean(
+            ignoreSelector
+            && target instanceof Element
+            && target.closest(ignoreSelector),
+        );
+    };
+
+    const resetPointer = (): void => {
+        pointerId = null;
+        moved = false;
+    };
+
+    element.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse' || shouldIgnore(event.target)) return;
+
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        moved = false;
+        event.preventDefault();
+    }, { passive: false });
+
+    element.addEventListener('pointermove', (event) => {
+        if (pointerId === null || event.pointerId !== pointerId) return;
+
+        if (
+            Math.abs(event.clientX - startX) > TAP_MOVE_TOLERANCE
+            || Math.abs(event.clientY - startY) > TAP_MOVE_TOLERANCE
+        ) {
+            moved = true;
+        }
+        event.preventDefault();
+    }, { passive: false });
+
+    element.addEventListener('pointerup', (event) => {
+        if (pointerId === null || event.pointerId !== pointerId) return;
+
+        event.preventDefault();
+        const shouldAct = !moved;
+        resetPointer();
+
+        if (shouldAct) {
+            lastDirectTouchActionAt = Date.now();
+            onAction();
+        }
+    }, { passive: false });
+
+    element.addEventListener('pointercancel', resetPointer);
+
+    element.addEventListener('click', (event) => {
+        if (shouldIgnore(event.target)) return;
+
+        // Some browsers still emit a compatibility click after pointerup.
+        const pointerType = (event as PointerEvent).pointerType;
+        if (
+            (pointerType && pointerType !== 'mouse')
+            || Date.now() - lastDirectTouchActionAt < 750
+        ) {
+            event.preventDefault();
+            return;
+        }
+        onAction();
+    });
+}
+
+/**
  * Create a tab service instance (backend-driven)
  */
 export function createTabService(
@@ -224,9 +310,25 @@ export function createTabService(
                     closeBtn.classList.remove('holding');
                 };
 
+                const finishHold = (e: PointerEvent) => {
+                    const shouldActivateTab = (
+                        !desktopQuery.matches
+                        && !isClosing
+                        && holdTimer !== null
+                    );
+                    cancelHold(e);
+
+                    // The close affordance occupies much of a compact mobile
+                    // tab. A short tap should still select the tab; only the
+                    // completed hold closes it.
+                    if (shouldActivateTab) {
+                        service.switchToTab(tab.id);
+                    }
+                };
+
                 // Pointer events for unified touch/mouse handling
                 closeBtn.addEventListener('pointerdown', startHold);
-                closeBtn.addEventListener('pointerup', cancelHold);
+                closeBtn.addEventListener('pointerup', finishHold);
                 closeBtn.addEventListener('pointercancel', cancelHold);
                 closeBtn.addEventListener('pointerleave', cancelHold);
                 closeBtn.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -244,7 +346,11 @@ export function createTabService(
                 tabBtn.appendChild(closeBtn);
             }
 
-            tabBtn.addEventListener('click', () => service.switchToTab(tab.id));
+            bindTapAction(
+                tabBtn,
+                () => service.switchToTab(tab.id),
+                '.tab-close',
+            );
             tabBar.appendChild(tabBtn);
         });
 
@@ -252,7 +358,7 @@ export function createTabService(
         const addBtn = document.createElement('button');
         addBtn.className = 'tab-btn tab-add';
         addBtn.textContent = '+';
-        addBtn.addEventListener('click', () => {
+        bindTapAction(addBtn, () => {
             service.requestCreateTab().catch(console.error);
         });
         tabBar.appendChild(addBtn);

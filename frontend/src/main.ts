@@ -676,18 +676,34 @@ async function init(): Promise<void> {
         modifierManager.reset();
     });
 
-    // Handle visual viewport (mobile keyboard) - adjust app size for iOS
-    // Terminal refit is handled by ResizeObserver on terminal-container
+    // Keep the whole app inside the visible viewport while the mobile keyboard
+    // is open. Android also uses interactive-widget=resizes-content from the
+    // viewport meta tag; this remains necessary for iOS and older browsers.
+    // Terminal refit is handled by ResizeObserver on terminal-container.
     if (window.visualViewport) {
         const app = document.getElementById('app');
+        let viewportFrame: number | null = null;
+
         const updateAppSize = () => {
-            if (app) {
-                app.style.height = `${window.visualViewport!.height}px`;
-                app.style.transform = `translateY(${window.visualViewport!.offsetTop}px)`;
-            }
+            if (!app || viewportFrame !== null) return;
+
+            viewportFrame = requestAnimationFrame(() => {
+                viewportFrame = null;
+                const viewport = window.visualViewport;
+                if (!viewport) return;
+
+                app.style.position = 'fixed';
+                app.style.top = `${viewport.offsetTop}px`;
+                app.style.left = `${viewport.offsetLeft}px`;
+                app.style.width = `${viewport.width}px`;
+                app.style.height = `${viewport.height}px`;
+                app.style.transform = '';
+            });
         };
         window.visualViewport.addEventListener('resize', updateAppSize);
         window.visualViewport.addEventListener('scroll', updateAppSize);
+        window.addEventListener('resize', updateAppSize);
+        updateAppSize();
     }
 
     // Focus terminal on container click
