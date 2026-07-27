@@ -60,15 +60,20 @@ feel instead of a transient floating button.
 
 1. **Long-press** → the word under the finger highlights immediately (no drag
    required to get a usable selection).
-2. **Draggable handles** appear at both ends of the selection — a ~14 px dot
-   with a ~44 px touch target, each snapping to the nearest cell. Dragging
-   either handle grows/shrinks the range, including across lines.
+2. **Endpoint markers** appear at both ends of the selection — a ~14 px dot at
+   each end, snapped to the cell boundary.
 
-   While a selection is active, **1-finger drag adjusts the nearest handle and
-   scroll is paused** — the selection is screen-only, so there is no cross-screen
-   tracking and no repaint-drift in zellij. To grab off-screen text: dismiss,
-   scroll to it, then re-select. **2-finger pan stays enabled**; panning only
-   moves the camera and the handles ride along with their cells.
+   As shipped these are *indicators*, not hit targets: they are
+   `pointer-events: none`, and adjustment is driven by the terminal surface
+   instead. While a selection is active, **a 1-finger drag anywhere moves the
+   nearer endpoint and scroll is paused**. That is deliberately more forgiving
+   than dragging a 14 px dot on a phone, and it costs nothing — with only two
+   endpoints, "the nearer one" is unambiguous.
+
+   The selection is screen-only, so there is no cross-screen tracking and no
+   repaint-drift in zellij. To grab off-screen text: dismiss, scroll to it, then
+   re-select. **2-finger pan stays enabled**; panning only moves the camera and
+   the markers ride along with their cells.
 3. A **top action bar** slides in below Porterminal's own tab bar:
 
    ```
@@ -178,12 +183,12 @@ Ordered by dependency; each item is independently shippable.
    press point instead of only anchoring; drag still extends.
 3. **Top action bar (`SelectionBar`)** — *medium*. New UI component + wiring;
    `SelectionHandler` already exposes word + range + get/clear.
-4. **Draggable handles** — *large, the bulk of the work*. New handle elements,
-   cell↔pixel mapping through the fixed-grid transform (reuse
-   `SelectionHandler.touchToPosition` inverse), and repositioning on
-   zoom / pan / resize. Scroll is paused during selection, so no scroll-tracking
-   or edge-auto-scroll is needed — the selection lives entirely on the visible
-   screen.
+4. **Endpoint markers** — *smaller than planned*. `getSelectionEndpoints`
+   returns both ends in client pixels (`SelectionHandler`), the bar repositions
+   them on zoom / pan / adjust, and the drag is handled by the terminal surface
+   rather than by hit-testing the markers — so no per-handle drag state, and a
+   much larger effective target. Scroll is paused during selection, so no
+   scroll-tracking or edge-auto-scroll is needed.
 5. **Double-tap zoom toggle** — *small*. Toggle between fit (`zoom = 1`) and 2×
    anchored on the tapped cell, reusing `getFixedGridZoomContext` /
    `setFixedGridView` / `commitFixedGridView`.
@@ -195,7 +200,8 @@ Ordered by dependency; each item is independently shippable.
 - **Selection vs. scroll** — scroll is **paused** while a selection is active;
   1-finger drag adjusts the nearest handle. Selection is screen-only (no
   edge-auto-scroll, no cross-screen tracking). 2-finger pan stays enabled.
-- **Handle visuals** — ~14 px dot, ~44 px touch target, snaps to nearest cell.
+- **Handle visuals** — ~14 px dot, snapped to the cell boundary. Not a hit
+  target: a drag anywhere adjusts the nearer endpoint (see §3).
 - **Select-all** — the **visible screen only**, in both modes (consistent;
   zellij has no xterm scrollback anyway).
 - **Double-tap zoom** — **toggle fit (1×) ↔ 2×** at the tapped cell. Pinch still

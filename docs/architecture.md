@@ -60,7 +60,8 @@ porterminal/
 │   │   └── shell_detector.py    # Detect available shells
 │   ├── auth.py              # Authentication helpers
 │   ├── cloudflared.py       # Tunnel management
-│   └── server.py            # Uvicorn wrapper
+│   ├── server.py            # Uvicorn wrapper
+│   └── zellij.py            # Zellij client detection
 │
 ├── pty/                     # Platform-specific PTY implementations
 │   ├── manager.py           # SecurePTYManager wrapper
@@ -90,14 +91,16 @@ frontend/                    # Source frontend (TypeScript/Vite)
 │   │   └── ModifierManager.ts
 │   ├── gestures/            # Touch handling
 │   │   ├── GestureRecognizer.ts
-│   │   ├── SelectionHandler.ts
-│   │   └── SwipeDetector.ts
+│   │   └── SelectionHandler.ts
 │   ├── clipboard/ClipboardManager.ts
-│   ├── terminal/ResizeManager.ts
+│   ├── terminal/
+│   │   ├── ResizeManager.ts
+│   │   └── TerminalLayout.ts     # Fitting + fixed-grid zoom/pan
 │   ├── ui/                  # UI components
 │   │   ├── AuthOverlay.ts
 │   │   ├── ConnectionStatus.ts
 │   │   ├── DisconnectOverlay.ts
+│   │   ├── SelectionBar.ts
 │   │   ├── TextViewOverlay.ts
 │   │   └── Toolbar.ts
 │   └── types/index.ts
@@ -163,6 +166,7 @@ Implements ports with concrete technology.
 | `InMemoryTabRepository` | Tab storage |
 | `UserConnectionRegistry` | Tracks connections for broadcasting |
 | `SecurePTYManager` | Platform-specific PTY wrapper |
+| `NativeZellijClientDetector` | Which Zellij session a PTY joined, and client grids |
 
 ## Dual WebSocket Architecture
 
