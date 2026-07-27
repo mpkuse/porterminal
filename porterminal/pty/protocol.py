@@ -21,6 +21,11 @@ class PTYBackend(Protocol):
         """Current number of columns."""
         ...
 
+    @property
+    def process_id(self) -> int | None:
+        """PTY shell process ID when available."""
+        ...
+
     def spawn(
         self,
         cmd: list[str],

@@ -38,6 +38,11 @@ class UnixPTYBackend:
         """Current number of columns."""
         return self._cols
 
+    @property
+    def process_id(self) -> int | None:
+        """Return the forked shell process ID."""
+        return self._pid
+
     def spawn(
         self,
         cmd: list[str],

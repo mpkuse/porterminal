@@ -34,6 +34,10 @@ class RecordingPTY:
     def get_working_directory(self) -> str | None:
         return self._cwd
 
+    @property
+    def process_id(self) -> int | None:
+        return 12345
+
     def close(self) -> None:
         pass
 

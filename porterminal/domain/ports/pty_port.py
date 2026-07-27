@@ -49,6 +49,12 @@ class PTYPort(ABC):
         """Return the PTY shell's current working directory when available."""
         ...
 
+    @property
+    @abstractmethod
+    def process_id(self) -> int | None:
+        """Return the PTY shell process ID when available."""
+        ...
+
     @abstractmethod
     def close(self) -> None:
         """Close PTY and cleanup resources."""

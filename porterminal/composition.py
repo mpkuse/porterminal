@@ -103,6 +103,10 @@ class PTYManagerAdapter:
     def get_working_directory(self) -> str | None:
         return self._manager.get_working_directory()
 
+    @property
+    def process_id(self) -> int | None:
+        return self._manager.process_id
+
     def close(self) -> None:
         self._manager.close()
 

@@ -38,6 +38,12 @@ class WindowsPTYBackend:
         """Current number of columns."""
         return self._cols
 
+    @property
+    def process_id(self) -> int | None:
+        """Return the ConPTY shell process ID when exposed by pywinpty."""
+        pid = getattr(self._pty, "pid", None)
+        return pid if isinstance(pid, int) else None
+
     def spawn(
         self,
         cmd: list[str],

@@ -146,6 +146,10 @@ class FakePTY:
     def get_working_directory(self) -> str | None:
         return self._working_directory
 
+    @property
+    def process_id(self) -> int | None:
+        return 12345
+
     def close(self) -> None:
         self._alive = False
 

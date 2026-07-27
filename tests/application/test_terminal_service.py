@@ -29,6 +29,10 @@ class ExitOnReadPTY:
     def get_working_directory(self) -> str | None:
         return None
 
+    @property
+    def process_id(self) -> int | None:
+        return 12345
+
     def close(self) -> None:
         self._alive = False
 

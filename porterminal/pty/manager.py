@@ -167,6 +167,11 @@ class SecurePTYManager:
             return None
         return self._backend.get_working_directory()
 
+    @property
+    def process_id(self) -> int | None:
+        """Return the PTY shell process ID when the backend exposes it."""
+        return self._backend.process_id
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         if self._closed:
