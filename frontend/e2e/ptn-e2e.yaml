@@ -1,0 +1,8 @@
+# Throwaway config for the gesture e2e harness (run.sh points ptn at this).
+# No password so the browser connects straight through; isolated port.
+server:
+  host: 127.0.0.1
+  port: 9455
+security:
+  require_password: false
+  max_auth_attempts: 5

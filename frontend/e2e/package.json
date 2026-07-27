@@ -1,0 +1,12 @@
+{
+  "name": "porterminal-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Playwright gesture checks for the mobile touch scheme",
+  "scripts": {
+    "test": "node gestures.e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}
