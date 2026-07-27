@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import re
-import shlex
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -36,9 +35,6 @@ class ConnectionFlowState:
     paused: bool = False
     pause_time: float | None = None
     echo_suppression: bytearray = field(default_factory=bytearray)
-    command_buffer: bytearray = field(default_factory=bytearray)
-    command_tracking_valid: bool = True
-    last_input_was_cr: bool = False
 
 
 # Terminal response sequences that should NOT be written to PTY.
@@ -70,52 +66,20 @@ INTERACTIVE_THRESHOLD = 64  # Bytes - flush immediately for very small data
 MAX_INPUT_SIZE = 4096
 FLOW_PAUSE_TIMEOUT = 5.0  # seconds - auto-resume if client stops sending ACKs (was 15s)
 LOCAL_ECHO_MAX_BYTES = 128
-MAX_TRACKED_COMMAND_BYTES = 1024
 ZELLIJ_MONITOR_INTERVAL = 0.1
 ZELLIJ_CLIENT_START_TIMEOUT = 5.0
 ZELLIJ_DISCONNECT_GRACE_SECONDS = 2.0
-ZELLIJ_DETACH_SEQUENCE = b"\x0fd"
 # How often to detect which Zellij session each live PTY is attached to, so the
-# size authority reconciles however zellij was started (not just typed attach).
-# Only a fallback: a typed attach is picked up immediately by
-# _prepare_zellij_attach_if_needed, so this only has to catch the indirect routes
-# (tab completion, paste, snippets, shell rc). Each tick costs a process scan, so
-# it is kept well above the interactive path's cadence.
-ZELLIJ_SWEEP_INTERVAL = 1.0
-
-
-def _parse_zellij_attach(command: str) -> tuple[bool, str | None]:
-    """Return whether a shell command is a Zellij attach and its target name."""
-    try:
-        arguments = shlex.split(command, posix=True)
-    except ValueError:
-        return False, None
-
-    if arguments[:1] == ["command"]:
-        arguments = arguments[1:]
-    if len(arguments) < 2 or arguments[0].rsplit("/", 1)[-1] != "zellij":
-        return False, None
-    if arguments[1] not in {"a", "attach"}:
-        return False, None
-
-    # Options whose following value is not a session name.
-    value_options = {"--ca-cert", "--index", "-t", "--token"}
-    index = 2
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument == "--":
-            index += 1
-            break
-        if argument in value_options:
-            index += 2
-            continue
-        if argument.startswith("-"):
-            index += 1
-            continue
-        return True, argument
-
-    target = arguments[index] if index < len(arguments) else None
-    return True, target
+# size authority reconciles however zellij was started. Each tick costs a process
+# scan, so the cadence follows what the user is doing: pressing Enter may have
+# started (or ended) an attach, so watch closely for a moment afterwards and idle
+# slowly the rest of the time.
+ZELLIJ_SWEEP_INTERVAL_IDLE = 1.0
+ZELLIJ_SWEEP_INTERVAL_ACTIVE = 0.15
+# How long an Enter keeps the sweep at its attentive cadence. A `zellij attach`
+# needs a moment to launch and connect its socket, so one immediate check is not
+# enough to catch it.
+ZELLIJ_SWEEP_ACTIVE_WINDOW = 2.5
 
 
 class AsyncioClock:
@@ -136,9 +100,6 @@ class TerminalService:
         self,
         rate_limit_config: RateLimitConfig | None = None,
         max_input_size: int = MAX_INPUT_SIZE,
-        zellij_attach_size_provider: (
-            Callable[[str | None], TerminalDimensions | None] | None
-        ) = None,
         zellij_client_running_provider: Callable[[int], bool] | None = None,
         zellij_native_sizes_provider: (
             Callable[[str], list[TerminalDimensions]] | None
@@ -147,25 +108,31 @@ class TerminalService:
             Callable[[int], str | None] | None
         ) = None,
         zellij_snapshot_refresher: Callable[[], None] | None = None,
+        zellij_detach_provider: Callable[[int], bool] | None = None,
     ) -> None:
         self._rate_limit_config = rate_limit_config or RateLimitConfig()
         self._max_input_size = max_input_size
-        self._zellij_attach_size_provider = zellij_attach_size_provider
         self._zellij_client_running_provider = zellij_client_running_provider
         # Session-scoped sizes of native (non-Porterminal) clients on a Zellij
         # session; drives the "largest client wins" authority below.
         self._zellij_native_sizes_provider = zellij_native_sizes_provider
-        # Resolves which Zellij session a PTY's shell has actually attached to
-        # (by client presence, not by parsing typed input) — this is what makes
-        # the size authority robust to tab-completion, paste, snippets, and
-        # shell-rc auto-attach.
+        # Resolves which Zellij session a PTY's shell has actually attached to.
+        # This is the only attach detection there is: it reads process and socket
+        # state rather than reconstructing what the user typed, so it is correct
+        # for tab completion, paste, snippets and shell-rc auto-attach alike, and
+        # it reports the session actually joined rather than the name asked for.
         self._zellij_session_under_pty_provider = zellij_session_under_pty_provider
         # The providers above answer from a snapshot of the process table and open
         # sockets. Collecting that snapshot is blocking and costs tens of
         # milliseconds, so it is refreshed once per pass in a worker thread rather
         # than being re-collected inline by every provider call.
         self._zellij_snapshot_refresher = zellij_snapshot_refresher
+        # Ends the Zellij client attached under a PTY, used when the last browser
+        # viewing that tab goes away.
+        self._zellij_detach_provider = zellij_detach_provider
         self._zellij_sweep_task: asyncio.Task[None] | None = None
+        # Loop time until which the sweep stays at its attentive cadence.
+        self._zellij_sweep_active_until = 0.0
 
         # Multi-client support: track connections and read loops per session
         self._session_connections: dict[str, set[ConnectionPort]] = {}
@@ -605,11 +572,7 @@ class TerminalService:
             return
 
         if rate_limiter.try_acquire(len(filtered)):
-            await self._prepare_zellij_attach_if_needed(
-                session,
-                connection,
-                filtered,
-            )
+            self._note_zellij_relevant_input(filtered)
             await self._optimistic_echo(session, connection, filtered)
             session.pty_handle.write(filtered)
             session.touch(datetime.now(UTC))
@@ -622,105 +585,26 @@ class TerminalService:
             )
             logger.warning("Rate limit exceeded session_id=%s", session.id)
 
-    def _completed_input_lines(
-        self,
-        connection: ConnectionPort,
-        data: bytes,
-    ) -> list[str]:
-        """Track simple shell input and return lines completed by Enter."""
-        flow = self._flow_state.get(connection)
-        if flow is None:
-            return []
+    def _note_zellij_relevant_input(self, data: bytes) -> None:
+        """Raise the sweep cadence briefly after the user submits a line.
 
-        completed: list[str] = []
-        for byte in data:
-            if byte in {0x0D, 0x0A}:  # CR / LF
-                # Treat CRLF as one Enter.
-                if byte == 0x0A and flow.last_input_was_cr:
-                    flow.last_input_was_cr = False
-                    continue
-                if flow.command_tracking_valid:
-                    completed.append(flow.command_buffer.decode(errors="ignore"))
-                flow.command_buffer.clear()
-                flow.command_tracking_valid = True
-                flow.last_input_was_cr = byte == 0x0D
-                continue
-
-            flow.last_input_was_cr = False
-            if byte in {0x08, 0x7F}:  # Backspace
-                if flow.command_buffer:
-                    flow.command_buffer.pop()
-                continue
-            if byte in {0x03, 0x15}:  # Ctrl-C / Ctrl-U
-                flow.command_buffer.clear()
-                flow.command_tracking_valid = True
-                continue
-            if byte == 0x09:  # Tab-completed commands cannot be reconstructed reliably.
-                flow.command_tracking_valid = False
-                continue
-            if 0x20 <= byte < 0x7F and flow.command_tracking_valid:
-                if len(flow.command_buffer) < MAX_TRACKED_COMMAND_BYTES:
-                    flow.command_buffer.append(byte)
-                else:
-                    flow.command_tracking_valid = False
-                continue
-
-            # Cursor movement, control sequences, and non-ASCII editing make the
-            # shell's final line unknowable. Fall back to ordinary sizing.
-            flow.command_tracking_valid = False
-
-        return completed
-
-    async def _prepare_zellij_attach_if_needed(
-        self,
-        session: Session[PTYPort],
-        connection: ConnectionPort,
-        data: bytes,
-    ) -> None:
-        completed_lines = self._completed_input_lines(connection, data)
-        session_id = str(session.id)
-
-        for command in completed_lines:
-            is_attach, session_name = _parse_zellij_attach(command)
-            if not is_attach:
-                continue
-            if session_name is None:
-                # Bare `zellij a` gives no name to scope the shared-size
-                # authority on; keep the legacy native-only behaviour.
-                await self._legacy_attach_lock(session)
-                return
-            # Register this PTY as a viewer of `session_name`, seed its natural
-            # grid, and let the "largest client wins" authority reconcile.
-            self._sessions[session_id] = session
-            self._session_zellij_name[session_id] = session_name
-            self._session_natural.setdefault(session_id, session.dimensions)
-            self._start_zellij_client_monitor(session, session_id)
-            await self._reconcile_zellij_group(session_name)
+        Pressing Enter is the moment a shell may start or end a Zellij attach, so
+        it is worth looking more often for a couple of seconds. Only the presence
+        of a newline is used - nothing about what was typed is inspected or kept.
+        """
+        if b"\r" not in data and b"\n" not in data:
             return
-
-    async def _legacy_attach_lock(self, session: Session[PTYPort]) -> None:
-        """Fallback for un-named ``zellij a``: lock to the min of the native
-        clients found system-wide (the pre-existing single-tab behaviour)."""
-        session_id = str(session.id)
-        if session_id in self._zellij_size_locks or self._zellij_attach_size_provider is None:
-            return
-        await self._refresh_zellij_snapshot()
         try:
-            dimensions = self._zellij_attach_size_provider(None)
-        except Exception:
-            logger.exception("Failed to inspect native Zellij client dimensions")
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
             return
-        if dimensions is None:
-            return
-        session.update_dimensions(dimensions)
-        session.pty_handle.resize(dimensions)
-        session.touch(datetime.now(UTC))
-        self._zellij_size_locks[session_id] = dimensions
-        self._start_zellij_client_monitor(session, session_id)
-        await self._broadcast_message(
-            session_id,
-            {"type": "zellij_size_lock", "cols": dimensions.cols, "rows": dimensions.rows},
-        )
+        self._zellij_sweep_active_until = now + ZELLIJ_SWEEP_ACTIVE_WINDOW
+
+    def _zellij_sweep_interval(self) -> float:
+        """Attentive right after a submitted line, idle otherwise."""
+        if asyncio.get_running_loop().time() < self._zellij_sweep_active_until:
+            return ZELLIJ_SWEEP_INTERVAL_ACTIVE
+        return ZELLIJ_SWEEP_INTERVAL_IDLE
 
     def _zellij_members(self, zname: str) -> list[str]:
         """Session ids actively viewing ``zname`` (alive PTY + a live browser)."""
@@ -841,7 +725,7 @@ class TerminalService:
                     await self._zellij_sweep_once()
                 except Exception:
                     logger.exception("Zellij attach sweep tick failed")
-                await asyncio.sleep(ZELLIJ_SWEEP_INTERVAL)
+                await asyncio.sleep(self._zellij_sweep_interval())
         finally:
             self._zellij_sweep_task = None
 
@@ -875,6 +759,10 @@ class TerminalService:
                 self._session_zellij_name[sid] = actual
                 self._session_natural.setdefault(sid, session.dimensions)
                 affected.add(actual)
+                # Watch this client closely so the grid is released promptly when
+                # it goes. Detaching from inside Zellij submits no line, so the
+                # sweep's own cadence would stay at its idle interval.
+                self._start_zellij_client_monitor(session, sid)
             else:
                 # The tab's Zellij client is gone: drop it from the group.
                 self._session_zellij_name.pop(sid, None)
@@ -998,13 +886,30 @@ class TerminalService:
             if not session.pty_handle.is_alive():
                 return
 
-            session.pty_handle.write(ZELLIJ_DETACH_SEQUENCE)
-            session.touch(datetime.now(UTC))
-            logger.info(
-                "Detached native Zellij client after last browser disconnected "
-                "session_id=%s",
-                session_id,
-            )
+            detach = self._zellij_detach_provider
+            root_pid = session.pty_handle.process_id
+            if detach is None or root_pid is None:
+                return
+
+            # Ask the Zellij client under this PTY to exit, rather than typing a
+            # detach keybinding into the shell. The keybinding is configurable, so
+            # sending one blind risks delivering the keystrokes to whatever
+            # application happens to be focused inside the session.
+            await self._refresh_zellij_snapshot()
+            try:
+                detached = await asyncio.to_thread(detach, root_pid)
+            except Exception:
+                logger.exception(
+                    "Failed to detach Zellij client session_id=%s", session_id
+                )
+                return
+            if detached:
+                session.touch(datetime.now(UTC))
+                logger.info(
+                    "Detached Zellij client after last browser disconnected "
+                    "session_id=%s",
+                    session_id,
+                )
         finally:
             if self._zellij_disconnect_tasks.get(session_id) is current_task:
                 self._zellij_disconnect_tasks.pop(session_id, None)

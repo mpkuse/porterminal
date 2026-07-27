@@ -1,9 +1,10 @@
-"""Detect terminal dimensions used by native Zellij clients on Linux."""
+"""Inspect Zellij clients on Linux: which session, what grid, still alive."""
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -25,17 +26,20 @@ SNAPSHOT_TTL_SECONDS = 0.2
 
 
 class NativeZellijClientDetector:
-    """Find the smallest grid used by Zellij clients outside Porterminal.
+    """Inspect the Zellij clients running on this machine.
 
-    Zellij renders every attached client using the minimum rows and columns
-    reported by all clients. Before Porterminal attaches, this detector reads
-    the grids of native clients (for example GNOME Terminal) so the browser can
-    join without becoming the new minimum.
+    Answers the three questions the size authority asks: which session a tab's
+    shell has attached to, what grids the clients Porterminal does not own are
+    using, and whether a tab's client is still alive. It can also end one.
 
-    Clients descended from the Porterminal server process are ignored. This is
-    what keeps another Porterminal tab from being mistaken for a native client.
-    On platforms without Linux procfs the detector safely returns ``None`` and
-    normal browser sizing remains in effect.
+    Zellij renders every attached client at the minimum rows and columns across
+    all of them, so a native client (a real terminal, an SSH session) caps the
+    grid and must never be shrunk by a browser joining.
+
+    Clients descended from the Porterminal server are excluded throughout: their
+    winsize is whatever we pinned it to, not a real device size. Detection needs
+    Linux procfs and degrades to "no client found" elsewhere, which leaves
+    ordinary browser sizing in effect.
     """
 
     def __init__(
@@ -67,35 +71,6 @@ class NativeZellijClientDetector:
 
     def _is_cache_fresh(self, captured_at: float) -> bool:
         return (time.monotonic() - captured_at) < self._snapshot_ttl
-
-    def __call__(self, session_name: str | None = None) -> TerminalDimensions | None:
-        if not sys.platform.startswith("linux") or not self._proc_root.is_dir():
-            return None
-
-        processes = list(self._iter_processes())
-        if session_name and not self._has_live_session(processes, session_name):
-            return None
-
-        sizes: list[TerminalDimensions] = []
-        for pid, arguments in processes:
-            if not self._is_zellij_client(arguments):
-                continue
-            if self._has_ancestor(pid, self._server_pid):
-                continue
-
-            dimensions = self._read_terminal_dimensions(pid)
-            if dimensions is not None:
-                sizes.append(dimensions)
-
-        if not sizes:
-            return None
-
-        # This mirrors Zellij's own multi-client rule: rows and columns are
-        # minimized independently rather than selecting one client's rectangle.
-        return TerminalDimensions.clamped(
-            min(size.cols for size in sizes),
-            min(size.rows for size in sizes),
-        )
 
     def has_descendant_client(self, root_pid: int) -> bool:
         """Return whether a Zellij client is running below a PTY shell process."""
@@ -212,6 +187,26 @@ class NativeZellijClientDetector:
         client_pid = self.pty_zellij_client_pid(root_pid)
         return self.zellij_session_of_pid(client_pid) if client_pid else None
 
+    def detach_client(self, root_pid: int) -> bool:
+        """Detach the Zellij client running under a PTY shell.
+
+        Signals that one client process to exit, which is what detaching is: the
+        session's server process is separate and keeps running, so the session and
+        its panes survive. Returns whether a client was found and signalled.
+
+        Preferred over writing a detach keybinding to the PTY, which assumes the
+        user has not rebound it — a wrong guess types the keystrokes straight into
+        whatever application is focused inside the session.
+        """
+        client_pid = self.pty_zellij_client_pid(root_pid)
+        if client_pid is None:
+            return False
+        try:
+            os.kill(client_pid, signal.SIGTERM)
+        except OSError:
+            return False
+        return True
+
     def _iter_processes(self) -> list[tuple[int, list[str]]]:
         """Cached process table. See :meth:`refresh` for the caching contract."""
         if self._process_cache is not None and self._is_cache_fresh(self._process_cache_at):
@@ -248,32 +243,6 @@ class NativeZellijClientDetector:
         if not arguments or Path(arguments[0]).name != "zellij":
             return False
         return "--server" not in arguments[1:]
-
-    @staticmethod
-    def _server_session_name(arguments: list[str]) -> str | None:
-        if not arguments or Path(arguments[0]).name != "zellij":
-            return None
-        try:
-            server_index = arguments.index("--server")
-            socket_path = arguments[server_index + 1]
-        except (ValueError, IndexError):
-            return None
-        return Path(socket_path).name
-
-    def _has_live_session(
-        self,
-        processes: list[tuple[int, list[str]]],
-        session_name: str,
-    ) -> bool:
-        live_names = {
-            name
-            for _, arguments in processes
-            if (name := self._server_session_name(arguments)) is not None
-        }
-        if session_name in live_names:
-            return True
-        # Zellij accepts an unambiguous session-name prefix on attach.
-        return sum(name.startswith(session_name) for name in live_names) == 1
 
     def _has_ancestor(self, pid: int, ancestor_pid: int) -> bool:
         seen: set[int] = set()

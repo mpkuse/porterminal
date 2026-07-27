@@ -1,10 +1,10 @@
 """Tests for TerminalService."""
 
 import asyncio
+import contextlib
 
 from porterminal.application.services import TerminalService
 from porterminal.application.services import terminal_service as terminal_service_module
-from porterminal.application.services.terminal_service import _parse_zellij_attach
 from porterminal.domain import TerminalDimensions
 
 
@@ -130,28 +130,20 @@ class AllowAllRateLimiter:
         return True
 
 
-def test_parse_zellij_attach_distinguishes_attach_from_new_session():
-    assert _parse_zellij_attach("zellij a") == (True, None)
-    assert _parse_zellij_attach("zellij attach work") == (True, "work")
-    assert _parse_zellij_attach("command /usr/local/bin/zellij a work") == (True, "work")
-    assert _parse_zellij_attach("zellij attach --index 2") == (True, None)
-    assert _parse_zellij_attach("zellij") == (False, None)
-    assert _parse_zellij_attach("echo zellij a") == (False, None)
+async def test_submitted_line_raises_the_sweep_cadence(sample_session, fake_pty):
+    """Whether a line was submitted is the only thing input is read for.
 
-
-async def test_zellij_attach_adopts_native_dimensions_before_input(
-    sample_session,
-    fake_pty,
-):
-    native_dimensions = TerminalDimensions(cols=155, rows=42)
-    requested_names = []
-    service = TerminalService(
-        zellij_native_sizes_provider=lambda name: (
-            requested_names.append(name) or [native_dimensions]
-        ),
-    )
+    Attach detection reads process and socket state, not keystrokes, so nothing
+    about what was typed is parsed or retained - an Enter just means "the shell
+    may have started or ended an attach, so look again soon".
+    """
+    service = TerminalService()
     connection = FakeConnection()
     service._register_connection(str(sample_session.id), connection)
+    original_dimensions = sample_session.dimensions
+    assert service._zellij_sweep_interval() == (
+        terminal_service_module.ZELLIJ_SWEEP_INTERVAL_IDLE
+    )
 
     await service._handle_binary_input(
         sample_session,
@@ -160,57 +152,32 @@ async def test_zellij_attach_adopts_native_dimensions_before_input(
         connection,
     )
 
-    # A native client on that session caps the grid; the browser adopts it.
-    assert requested_names == ["work"]
-    assert sample_session.dimensions == native_dimensions
-    assert fake_pty.dimensions == native_dimensions
+    assert service._zellij_sweep_interval() == (
+        terminal_service_module.ZELLIJ_SWEEP_INTERVAL_ACTIVE
+    )
+    # Forwarded verbatim, and sizing is untouched until detection says otherwise.
     assert fake_pty.get_input() == [b"zellij attach work\r"]
-    assert connection.messages == [
-        {"type": "zellij_size_lock", "cols": 155, "rows": 42}
-    ]
-
-
-async def test_plain_zellij_start_keeps_browser_dimensions(sample_session, fake_pty):
-    provider_calls = []
-    service = TerminalService(
-        zellij_attach_size_provider=lambda name: provider_calls.append(name),
-    )
-    connection = FakeConnection()
-    service._register_connection(str(sample_session.id), connection)
-    original_dimensions = sample_session.dimensions
-
-    await service._handle_binary_input(
-        sample_session,
-        b"zellij\r",
-        AllowAllRateLimiter(),
-        connection,
-    )
-
-    assert provider_calls == []
     assert sample_session.dimensions == original_dimensions
     assert fake_pty.dimensions == original_dimensions
     assert connection.messages == []
 
 
-async def test_zellij_attach_without_native_client_keeps_browser_dimensions(
-    sample_session,
-    fake_pty,
-):
-    service = TerminalService(zellij_attach_size_provider=lambda _name: None)
+async def test_unsubmitted_input_leaves_the_sweep_idle(sample_session):
+    """A partial line cannot have started anything, so it must not wake the sweep."""
+    service = TerminalService()
     connection = FakeConnection()
     service._register_connection(str(sample_session.id), connection)
-    original_dimensions = sample_session.dimensions
 
     await service._handle_binary_input(
         sample_session,
-        b"zellij a\r",
+        b"zellij attach work",
         AllowAllRateLimiter(),
         connection,
     )
 
-    assert sample_session.dimensions == original_dimensions
-    assert fake_pty.dimensions == original_dimensions
-    assert connection.messages == []
+    assert service._zellij_sweep_interval() == (
+        terminal_service_module.ZELLIJ_SWEEP_INTERVAL_IDLE
+    )
 
 
 async def test_browser_cannot_release_zellij_size_lock(sample_session):
@@ -267,20 +234,29 @@ async def test_process_monitor_releases_lock_after_zellij_client_exits(sample_se
     assert connection.messages == [{"type": "zellij_size_unlock"}]
 
 
-async def test_last_browser_disconnect_detaches_native_zellij(
+async def test_last_browser_disconnect_signals_the_zellij_client(
     sample_session,
     fake_pty,
     monkeypatch,
 ):
+    """Detaching ends the client process; it never types a keybinding.
+
+    The detach keybinding is user-configurable, so writing one blind would send
+    the keystrokes to whatever application is focused inside the session.
+    """
     monkeypatch.setattr(terminal_service_module, "ZELLIJ_DISCONNECT_GRACE_SECONDS", 0)
-    service = TerminalService()
+    detached: list[int] = []
+    service = TerminalService(
+        zellij_detach_provider=lambda pid: detached.append(pid) or True,
+    )
     session_id = str(sample_session.id)
     service._zellij_size_locks[session_id] = TerminalDimensions(cols=155, rows=42)
 
     service._schedule_zellij_detach_on_disconnect(sample_session, session_id)
     await service._zellij_disconnect_tasks[session_id]
 
-    assert fake_pty.get_input() == [b"\x0fd"]
+    assert detached == [sample_session.pty_handle.process_id]
+    assert fake_pty.get_input() == []
 
 
 async def test_browser_reconnect_cancels_pending_zellij_detach(
@@ -414,3 +390,28 @@ async def test_sweep_snapshot_cost_does_not_scale_with_tab_count():
     refreshes.clear()
     await service._zellij_sweep_once()
     assert len(refreshes) == 1
+
+
+async def test_detected_attach_starts_a_client_monitor():
+    """The monitor is what releases the grid promptly once the client goes.
+
+    Detaching from inside Zellij submits no line, so the sweep alone would sit at
+    its idle cadence and leave the tab pinned to a grid nothing is using.
+    """
+    service = TerminalService(
+        zellij_session_under_pty_provider=lambda _pid: "work",
+        zellij_native_sizes_provider=lambda _n: [],
+        zellij_client_running_provider=lambda _pid: True,
+    )
+    session = _browser_session("phone", 90, 40)
+    sid = str(session.id)
+    service._sessions[sid] = session
+    service._session_connections[sid] = {FakeConnection()}
+
+    await service._zellij_sweep_once()
+
+    assert sid in service._zellij_monitor_tasks
+    task = service._zellij_monitor_tasks[sid]
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task

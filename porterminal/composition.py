@@ -203,11 +203,11 @@ def create_container(
 
     zellij_detector = NativeZellijClientDetector()
     terminal_service = TerminalService(
-        zellij_attach_size_provider=zellij_detector,
         zellij_client_running_provider=zellij_detector.has_descendant_client,
         zellij_native_sizes_provider=zellij_detector.native_client_sizes,
         zellij_session_under_pty_provider=zellij_detector.zellij_session_under_pty,
         zellij_snapshot_refresher=zellij_detector.refresh,
+        zellij_detach_provider=zellij_detector.detach_client,
     )
 
     # Create a shell provider closure for ManagementService
