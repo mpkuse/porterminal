@@ -16,8 +16,8 @@
 
     <!-- Icons (PWA disabled - not useful for tunnel-based access) -->
     <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
-  <script type="module" crossorigin src="/static/assets/app-DKC9HlDn.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/assets/app-BMEwbfbp.css">
+  <script type="module" crossorigin src="/static/assets/app-DLT0V8Ow.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/assets/app-DLsOG5vY.css">
 </head>
 <body>
     <div id="app">
@@ -27,10 +27,13 @@
         <div id="top-bar">
             <div id="tab-bar">
                 <span id="connection-dot"></span>
-                <button id="btn-textview" title="Plain Text View">TXT</button>
+                <button id="btn-textview" title="Read (word-wrapped view)">Read</button>
                 <!-- Tabs rendered by JS -->
             </div>
             <div id="top-controls">
+                <button id="btn-tab-prev" class="tabnav-btn" title="Previous zellij tab" hidden>‹</button>
+                <button id="btn-tab-next" class="tabnav-btn" title="Next zellij tab" hidden>›</button>
+                <button id="btn-reset-view" title="Reset zoomed terminal view">Reset</button>
                 <button id="btn-font-down" title="Smaller text">A−</button>
                 <button id="btn-font-up" title="Larger text">A+</button>
                 <button id="btn-toolbar-autohide" title="Pin desktop top bar" aria-label="Pin desktop top bar">
@@ -83,6 +86,8 @@
                 <button class="tool-btn modifier" id="btn-ctrl">Ctl</button>
                 <button class="tool-btn modifier" id="btn-alt">Alt</button>
                 <button class="tool-btn modifier" id="btn-shift">Sft</button>
+                <button class="tool-btn zellij-detach" id="btn-zellij-detach"
+                        data-send='["\u000f",80,"d"]' title="Detach from Zellij">Detach</button>
                 <!-- Generated buttons inserted here -->
                 <button class="tool-btn icon" id="btn-paste">⎘</button>
             </div>
@@ -92,9 +97,6 @@
         </div>
 
     </div>
-
-    <!-- Floating Copy Button (iOS) -->
-    <button id="copy-button">Copy</button>
 
     <!-- Connection Lost Overlay -->
     <div id="disconnect-overlay" class="hidden">
@@ -113,10 +115,13 @@
             <div id="help-body">
                 <div class="help-section">
                     <div class="help-title">Gestures</div>
-                    <div class="help-item"><span class="help-key">Swipe ← / →</span> History up/down</div>
-                    <div class="help-item"><span class="help-key">Long press</span> Start selection</div>
-                    <div class="help-item"><span class="help-key">Double tap</span> Select word</div>
-                    <div class="help-item"><span class="help-key">Pinch</span> Zoom font size</div>
+                    <div class="help-item"><span class="help-key">Tap</span> Click / switch tab</div>
+                    <div class="help-item"><span class="help-key">Long press</span> Select word (drag to adjust)</div>
+                    <div class="help-item"><span class="help-key">Double tap</span> Zoom to point (toggle)</div>
+                    <div class="help-item"><span class="help-key">One-finger drag</span> Scroll</div>
+                    <div class="help-item"><span class="help-key">Two-finger drag</span> Pan zoomed view</div>
+                    <div class="help-item"><span class="help-key">Pinch</span> Zoom in / out</div>
+                    <div class="help-item"><span class="help-key">Reset</span> Restore the fitted terminal view</div>
                 </div>
                 <div class="help-section">
                     <div class="help-title">Modifiers (Ctl, Alt, Sft)</div>
@@ -131,6 +136,7 @@
                 <div class="help-section">
                     <div class="help-title">Toolbar</div>
                     <div class="help-item"><span class="help-key">A− / A+</span> Decrease / increase font size</div>
+                    <div class="help-item"><span class="help-key">Detach</span> Detach the current Zellij client</div>
                     <div class="help-item"><span class="help-key">⚡</span> Quick Commands — tap to send, long-press to copy</div>
                     <div class="help-item"><span class="help-key">TXT</span> Plain text view</div>
                     <div class="help-item"><span class="help-key">⚙</span> Settings</div>
@@ -233,7 +239,8 @@
     <div id="textview-overlay" class="hidden">
         <div id="textview-content">
             <div id="textview-header">
-                <span id="textview-title">Text</span>
+                <span id="textview-title">Read</span>
+                <button class="textview-zoom-btn" id="textview-wrap" title="Toggle word wrap">Wrap</button>
                 <button class="textview-zoom-btn" id="textview-zoom-out">−</button>
                 <button class="textview-zoom-btn" id="textview-zoom-in">+</button>
                 <button id="textview-close">×</button>
