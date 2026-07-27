@@ -5,6 +5,11 @@
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 
+export interface TerminalGrid {
+    cols: number;
+    rows: number;
+}
+
 /** Tab state */
 export interface Tab {
     id: number;                  // Local numeric ID for UI
@@ -17,6 +22,23 @@ export interface Tab {
     sessionId: string | null;
     heartbeatInterval: ReturnType<typeof setInterval> | null;
     reconnectAttempts: number;
+    fixedGrid: TerminalGrid | null;
+    fixedGridBaseScale: number;
+    fixedGridBaseScreenWidth: number;
+    fixedGridBaseScreenHeight: number;
+    /** Fitted font size at zoom 1; zoom re-rasterises from this for crisp text. */
+    fixedGridBaseFontSize: number;
+    /** `<cw>x<ch>:<cols>x<rows>` of the last fit; lets switches skip re-fitting. */
+    fixedGridFitSignature: string;
+    fixedGridZoom: number;
+    fixedGridPanX: number;
+    fixedGridPanY: number;
+    /** CSS scale and content size of the last render, reused for cheap panning. */
+    fixedGridRenderScale: number;
+    fixedGridContentWidth: number;
+    fixedGridContentHeight: number;
+    fontSizeBeforeFixedGrid: number | null;
+    cursorBlinkBeforeFixedGrid: boolean | null;
 }
 
 /** Server tab info from tab_list message */
@@ -80,32 +102,6 @@ export interface AppConfig {
     notify_on_startup?: boolean;
 }
 
-/** Gesture state for touch handling */
-export interface GestureState {
-    initialDistance: number;
-    initialFontSize: number;
-    isSelecting: boolean;
-    longPressTimer: ReturnType<typeof setTimeout> | null;
-    startX: number;
-    startY: number;
-    startTime: number;
-    fontSizeChanged: boolean;
-    lastTapTime: number;
-    lastTapX: number;
-    lastTapY: number;
-    selectAnchorCol: number;
-    selectAnchorRow: number;
-    pointerId: number | null;
-}
-
-/** Swipe direction */
-export type SwipeDirection = 'up' | 'down' | 'left' | 'right';
-
-/** Swipe detection result */
-export interface SwipeResult {
-    direction: SwipeDirection;
-}
-
 /** Terminal position */
 export interface TerminalPosition {
     col: number;
@@ -118,6 +114,9 @@ export interface SessionInfoMessage {
     session_id: string;
     shell?: string;
     tab_id?: string | null;
+    cols?: number;
+    rows?: number;
+    zellij_size_lock?: TerminalGrid;
 }
 
 export interface PingMessage {

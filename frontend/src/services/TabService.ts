@@ -16,6 +16,7 @@ import type { ConnectionService } from './ConnectionService';
 import type { ManagementService } from './ManagementService';
 import { applyModifiers } from '@/input/KeyMapper';
 import { getTerminalFontSize } from '@/utils/storage';
+import { fitTerminalToContainer } from '@/terminal/TerminalLayout';
 
 export interface TabService {
     /** All tabs */
@@ -211,8 +212,8 @@ export function createTabService(
     defaultShellId: string,
     callbacks: {
         onInputSend: (data: string) => void;
-        onSelectionCopy: (text: string) => void;
         scheduleResize: (tab: Tab) => void;
+        onSelectionChange: () => void;
     }
 ): TabService {
     const tabs: Tab[] = [];
@@ -453,6 +454,20 @@ export function createTabService(
             sessionId: serverTab.session_id,
             heartbeatInterval: null,
             reconnectAttempts: 0,
+            fixedGrid: null,
+            fixedGridBaseScale: 1,
+            fixedGridBaseScreenWidth: 0,
+            fixedGridBaseScreenHeight: 0,
+            fixedGridBaseFontSize: 0,
+            fixedGridFitSignature: '',
+            fixedGridZoom: 1,
+            fixedGridPanX: 0,
+            fixedGridPanY: 0,
+            fixedGridRenderScale: 0,
+            fixedGridContentWidth: 0,
+            fixedGridContentHeight: 0,
+            fontSizeBeforeFixedGrid: null,
+            cursorBlinkBeforeFixedGrid: null,
         };
 
         // iOS-specific event handlers (now that tab is defined)
@@ -533,12 +548,9 @@ export function createTabService(
             processAndSend(data);
         });
 
-        // Auto-copy on selection
+        // Selection change — drives the Copy bar for mouse (non-touch) selection.
         terminal.onSelectionChange(() => {
-            const selection = terminal.getSelection();
-            if (selection && selection.length > 0) {
-                callbacks.onSelectionCopy(selection);
-            }
+            callbacks.onSelectionChange();
         });
 
         // Handle resize
@@ -663,16 +675,24 @@ export function createTabService(
             // Show selected
             tab.container.style.display = 'block';
             activeTabId = tabId;
+            // Refresh top-bar controls that depend on the active tab (e.g. the
+            // fixed-grid view-mode toggle).
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('ptn:fixedgridchange'));
+            }
 
             // Focus and fit - use rAF to ensure CSS layout is complete
             // Note: for new tabs, opacity is managed by ConnectionService after buffer flush
             tab.term.focus();
             requestAnimationFrame(() => {
-                tab.fitAddon.fit();
+                fitTerminalToContainer(tab);
 
-                // If already visible (reconnect/switch back), scroll to bottom
-                // Use onRender callbacks to handle xterm.js async buffer reflow
-                if (tab.container.style.opacity !== '0') {
+                // If already visible (reconnect/switch back), scroll to bottom.
+                // Use onRender callbacks to handle xterm.js async buffer reflow.
+                // Zellij-attached grids own an alternate screen with no
+                // scrollback, so the repeated scroll loop is pure wasted reflow
+                // on every switch - skip it for a smoother tab change.
+                if (tab.container.style.opacity !== '0' && !tab.fixedGrid) {
                     tab.term.scrollToBottom();
 
                     let count = 0;

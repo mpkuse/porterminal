@@ -281,6 +281,13 @@ html, body {
     font-size: 18px;
     padding: 0 10px;
     border-right: none;
+    /* Pin to the right edge of the (scrollable) tab strip so it is always
+       reachable no matter how many tabs are open or how far it is scrolled. */
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    background: var(--bg-gradient-bottom);
+    border-left: 1px solid var(--border-subtle);
 }
 
 .tab-btn.tab-add:active {
@@ -359,6 +366,38 @@ html, body {
     50% { transform: scale(1.1); }
 }
 
+/* Touch devices: give tabs a finger-sized hit target so switching is easy. */
+@media (pointer: coarse) {
+    #top-bar,
+    #top-bar #tab-bar {
+        height: 42px;
+        min-height: 42px;
+    }
+
+    .tab-btn {
+        min-width: 44px;
+        height: 42px;
+        padding: 0 16px;
+        gap: 6px;
+        font-size: 15px;
+    }
+
+    .tab-btn.tab-add {
+        padding: 0 18px;
+        font-size: 22px;
+    }
+
+    .tabnav-btn {
+        min-width: 40px;
+        height: 42px;
+        font-size: 24px;
+    }
+
+    .tab-label {
+        font-size: 15px;
+    }
+}
+
 /* Top controls in tab bar */
 #top-controls {
     display: flex;
@@ -390,6 +429,37 @@ html, body {
     cursor: pointer;
     transition: color var(--transition-fast), background var(--transition-fast);
     border-radius: 4px;
+}
+
+/* Zellij tab navigation (prev/next) — finger-sized, zoom-independent switching */
+.tabnav-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    height: var(--row-height);
+    padding: 0 8px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+    border-radius: 4px;
+}
+
+.tabnav-btn:active {
+    color: var(--color-accent);
+    background: var(--hover-overlay);
+}
+
+.tabnav-btn[hidden] {
+    display: none;
+}
+
+#btn-reset-view {
+    display: none;
 }
 
 #btn-font-down:active,
@@ -932,60 +1002,89 @@ html, body {
     cursor: not-allowed;
 }
 
-/* ========== FLOATING COPY BUTTON (iOS) ========== */
-#copy-button {
+/* ========== SELECTION ACTION BAR + HANDLES ========== */
+.selection-bar {
     position: fixed;
-    top: 50%;
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
     left: 50%;
-    transform: translate(-50%, -50%);
-    padding: 8px 20px;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 2px;
+    padding: 4px;
     background: linear-gradient(to bottom, var(--bg-surface), var(--bg-elevated));
     border: 1px solid var(--border-light);
-    border-radius: var(--radius-md);
-    color: var(--text-high);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    z-index: 10000;
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow-elevated);
-    display: none;
+    z-index: 10001;
     -webkit-tap-highlight-color: transparent;
     -webkit-touch-callout: none;
     touch-action: manipulation;
-    transition: all var(--transition-fast);
+    animation: selectionBarAppear 0.12s ease-out;
 }
 
-#copy-button:active {
-    background: linear-gradient(to bottom, var(--bg-hover), var(--bg-surface));
-    transform: translate(-50%, -50%) scale(0.97);
+.selection-bar.hidden {
+    display: none;
 }
 
-#copy-button.visible {
-    display: block;
-    animation: copyButtonAppear 0.1s ease-out;
+.selection-bar-btn {
+    min-width: 44px;
+    height: 40px;
+    padding: 0 14px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--text-high);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
 }
 
-#copy-button.success {
-    background: linear-gradient(to bottom, var(--bg-success-gradient-top), var(--bg-success-gradient-bottom));
-    border-color: var(--color-success-border);
-    color: var(--color-success-text);
+.selection-bar-btn:active {
+    background: var(--bg-hover);
 }
 
-#copy-button.error {
-    background: linear-gradient(to bottom, var(--bg-danger-gradient-top), var(--bg-danger-gradient-bottom));
-    border-color: var(--color-danger-border);
-    color: var(--color-danger-text);
+.selection-bar-btn.primary {
+    color: var(--color-accent-text);
+    font-weight: 600;
 }
 
-@keyframes copyButtonAppear {
+.selection-bar-btn.close {
+    color: var(--text-high);
+    opacity: 0.65;
+    font-size: 16px;
+    padding: 0 12px;
+    min-width: 40px;
+}
+
+/* Endpoint handles: purely visual — the terminal handles the actual drag. */
+.sel-handle {
+    position: fixed;
+    width: 14px;
+    height: 14px;
+    margin-left: -7px;
+    background: var(--color-accent);
+    border: 1px solid var(--bg-elevated);
+    border-radius: 50%;
+    z-index: 10000;
+    pointer-events: none;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.sel-handle.hidden {
+    display: none;
+}
+
+@keyframes selectionBarAppear {
     from {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(0.9);
+        transform: translateX(-50%) translateY(-6px);
     }
     to {
         opacity: 1;
-        transform: translate(-50%, -50%) scale(1);
+        transform: translateX(-50%) translateY(0);
     }
 }
 
@@ -1692,6 +1791,25 @@ html, body {
 }
 
 @media (pointer: coarse), (max-width: 767px) {
+    #btn-reset-view {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 24px;
+        padding: 0 6px;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 10px;
+        touch-action: manipulation;
+    }
+
+    #btn-reset-view:active {
+        color: var(--color-accent);
+        background: var(--hover-overlay);
+    }
+
     #toolbar .toolbar-row:not(#toolbar-row1):not(#toolbar-row2) {
         display: none !important;
     }
