@@ -723,16 +723,8 @@ async function init(): Promise<void> {
             }
         }, 100);
 
-        if (config.update_available) {
-            setTimeout(() => {
-                updateOverlay.show({
-                    currentVersion: config.version || 'unknown',
-                    latestVersion: config.latest_version || null,
-                    upgradeCommand: config.upgrade_command || null,
-                    updateAvailable: true,
-                });
-            }, 500);
-        }
+        // Update-available popup suppressed: update notifications are handled
+        // out-of-band, so we no longer interrupt startup with the overlay.
     } catch (e) {
         console.error('Failed to connect management WebSocket:', e);
         disconnectOverlay.show();
