@@ -161,6 +161,17 @@ class SecurePTYManager:
             return False
         return self._backend.is_echo_enabled()
 
+    def get_working_directory(self) -> str | None:
+        """Return the shell's current working directory when detectable."""
+        if self._closed:
+            return None
+        return self._backend.get_working_directory()
+
+    @property
+    def process_id(self) -> int | None:
+        """Return the PTY shell process ID when the backend exposes it."""
+        return self._backend.process_id
+
     def close(self) -> None:
         """Close the PTY and clean up resources."""
         if self._closed:

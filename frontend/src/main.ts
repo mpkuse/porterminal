@@ -27,7 +27,6 @@ import { createModifierManager } from '@/input/ModifierManager';
 import { createInputHandler } from '@/input/InputHandler';
 
 // Gestures
-import { createSwipeDetector } from '@/gestures/SwipeDetector';
 import { createSelectionHandler } from '@/gestures/SelectionHandler';
 import { createGestureRecognizer } from '@/gestures/GestureRecognizer';
 
@@ -38,7 +37,7 @@ import { createClipboardManager } from '@/clipboard/ClipboardManager';
 import { createResizeManager } from '@/terminal/ResizeManager';
 
 // UI
-import { createCopyButton } from '@/ui/CopyButton';
+import { createSelectionBar } from '@/ui/SelectionBar';
 import { createComposeInput } from '@/ui/ComposeInput';
 import { createDisconnectOverlay } from '@/ui/DisconnectOverlay';
 import { createAuthOverlay } from '@/ui/AuthOverlay';
@@ -66,8 +65,18 @@ import {
 } from '@/utils/storage';
 
 // Types
-import type { AppConfig, ButtonSend, SwipeDirection, Tab } from '@/types';
+import type { AppConfig, ButtonSend, Tab } from '@/types';
 import type { TabService } from '@/services/TabService';
+import {
+    beginFixedTerminalPinch,
+    commitFixedTerminalView,
+    fitTerminalToContainer,
+    getFixedGridZoomContext,
+    panFixedTerminalView,
+    resetFixedTerminalView,
+    setFixedTerminalGrid,
+    setFixedTerminalView,
+} from '@/terminal/TerminalLayout';
 
 applyTheme(getLightMode());
 
@@ -76,7 +85,7 @@ applyTheme(getLightMode());
  * Uses onRender callbacks to overcome xterm.js async reflow timing.
  */
 function fitWithScrollToBottom(tab: Tab): void {
-    tab.fitAddon.fit();
+    fitTerminalToContainer(tab);
 
     // Immediate scroll
     tab.term.scrollToBottom();
@@ -145,7 +154,11 @@ function setupFontSizeControls(tabService: TabService): void {
         updateLabel(size);
 
         for (const tab of tabService.tabs) {
-            tab.term.options.fontSize = size;
+            if (tab.fixedGrid) {
+                tab.fontSizeBeforeFixedGrid = size;
+            } else {
+                tab.term.options.fontSize = size;
+            }
             if (tab.container.style.display !== 'none') {
                 fitWithScrollToBottom(tab);
             }
@@ -366,11 +379,21 @@ async function init(): Promise<void> {
             onInputSend: () => {
                 modifierManager.consumeSticky();
             },
-            onSelectionCopy: (text) => {
-                clipboardManager.copy(text, 'selectionChange');
-            },
             scheduleResize: (tab) => {
                 resizeManager.scheduleResize(tab);
+            },
+            onSelectionChange: () => {
+                // Mouse-driven selection (e.g. Samsung DeX) has no long-press to
+                // open the Copy bar, so surface it here. Touch selection is driven
+                // by the gesture callbacks; skip while a touch gesture is active
+                // to avoid double-driving the bar.
+                if (gestureRecognizer.isGestureActive()) return;
+                const tab = tabService.activeTab;
+                if (tab && tab.term.hasSelection()) {
+                    selectionBar.show();
+                } else {
+                    selectionBar.hide();
+                }
             },
         }
     );
@@ -407,49 +430,82 @@ async function init(): Promise<void> {
         { sendInput: sendToActiveTab }
     );
 
-    // Create copy button
-    const copyButton = createCopyButton(
-        clipboardManager,
-        {
-            clearSelection: () => {
-                const tab = tabService.activeTab;
-                if (tab) {
-                    tab.term.clearSelection();
-                }
-            },
-        }
-    );
-
     // Create gesture components
-    const swipeDetector = createSwipeDetector();
     const selectionHandler = createSelectionHandler();
+
+    // Selection UI: WhatsApp-style top action bar + endpoint handles.
+    const selectionBar = createSelectionBar(selectionHandler, {
+        getActiveTerminal: () => tabService.activeTab?.term ?? null,
+        copy: (text) => {
+            clipboardManager.copy(text, 'selectionBar');
+            const tab = tabService.activeTab;
+            if (tab) tab.term.clearSelection();
+        },
+        paste: async () => {
+            const tab = tabService.activeTab;
+            if (!tab) return;
+            const text = await clipboardManager.paste();
+            if (!text) return;
+            // Respect bracketed-paste mode so apps treat it as pasted, not typed.
+            const data = tab.term.modes.bracketedPasteMode
+                ? `\x1b[200~${text}\x1b[201~`
+                : text;
+            connectionService.sendInput(tab, data);
+            focusTerminalIfNotComposing();
+        },
+        clear: () => {
+            const tab = tabService.activeTab;
+            if (tab) tab.term.clearSelection();
+        },
+    });
+
     const gestureRecognizer = createGestureRecognizer(
         eventBus,
-        swipeDetector,
         selectionHandler,
         {
             getActiveTerminal: () => tabService.activeTab?.term ?? null,
-            sendArrowKey: (direction: SwipeDirection) => {
-                const tab = tabService.activeTab;
-                if (!tab) return;
-
-                if (direction === 'up') {
-                    connectionService.sendInput(tab, '\x1b[A');
-                    if (navigator.vibrate) navigator.vibrate(20);
-                } else if (direction === 'down') {
-                    connectionService.sendInput(tab, '\x1b[B');
-                    if (navigator.vibrate) navigator.vibrate(20);
-                }
-            },
-            showCopyButton: (text, x, y) => {
-                copyButton.show(text, x, y);
-            },
+            onSelectionStart: () => selectionBar.show(),
+            onSelectionChange: () => selectionBar.reposition(),
+            onSelectionEnd: () => selectionBar.hide(),
             focusTerminal: focusTerminalIfNotComposing,
             scheduleFitAfterFontChange: () => {
                 const tab = tabService.activeTab;
                 if (tab) {
                     fitWithScrollToBottom(tab);
                 }
+            },
+            getFixedGridView: () => {
+                const tab = tabService.activeTab;
+                return tab?.fixedGrid ? {
+                    zoom: tab.fixedGridZoom,
+                    panX: tab.fixedGridPanX,
+                    panY: tab.fixedGridPanY,
+                    canPanX: tab.fixedGridContentWidth > tab.container.clientWidth + 1,
+                    canPanY: tab.fixedGridContentHeight > tab.container.clientHeight + 1,
+                } : null;
+            },
+            beginFixedGridPinch: () => {
+                const tab = tabService.activeTab;
+                if (tab) beginFixedTerminalPinch(tab);
+            },
+            getFixedGridZoomContext: () => {
+                const tab = tabService.activeTab;
+                return tab ? getFixedGridZoomContext(tab) : null;
+            },
+            setFixedGridView: (zoom, panX, panY) => {
+                const tab = tabService.activeTab;
+                if (tab) setFixedTerminalView(tab, zoom, panX, panY);
+                selectionBar.reposition();
+            },
+            panFixedGridView: (panX, panY) => {
+                const tab = tabService.activeTab;
+                if (tab) panFixedTerminalView(tab, panX, panY);
+                selectionBar.reposition();
+            },
+            commitFixedGridView: () => {
+                const tab = tabService.activeTab;
+                if (tab) commitFixedTerminalView(tab);
+                selectionBar.reposition();
             },
             setKeyboardEnabled: (enabled) => {
                 tabService.setKeyboardEnabled(enabled);
@@ -458,7 +514,52 @@ async function init(): Promise<void> {
     );
 
     // Setup UI components
-    copyButton.setup();
+    selectionBar.setup();
+
+    // Test hook, gated behind ?e2e — lets Playwright drive the active terminal
+    // deterministically (the WebGL renderer exposes no per-cell DOM to target).
+    if (new URLSearchParams(window.location.search).has('e2e')) {
+        (window as unknown as { __ptn?: unknown }).__ptn = {
+            getActiveTerminal: () => tabService.activeTab?.term ?? null,
+            selectionBarVisible: () => selectionBar.isVisible(),
+            enterFixedGrid: (cols: number, rows: number) => {
+                const tab = tabService.activeTab;
+                if (!tab) return;
+                setFixedTerminalGrid(tab, { cols, rows });
+                fitWithScrollToBottom(tab);
+            },
+            getFixedState: () => {
+                const tab = tabService.activeTab;
+                if (!tab || !tab.fixedGrid) return null;
+                return {
+                    zoom: tab.fixedGridZoom,
+                    panX: tab.fixedGridPanX,
+                    panY: tab.fixedGridPanY,
+                };
+            },
+            // Send real input down the data plane (onData path), so tests can
+            // drive the shell (e.g. type `zellij attach ...`).
+            sendInput: (text: string) => {
+                const tab = tabService.activeTab;
+                if (tab) connectionService.sendInput(tab, text);
+            },
+            // Logical grid + any active fixed-grid (size-lock) dimensions.
+            getGrid: () => {
+                const tab = tabService.activeTab;
+                if (!tab) return null;
+                return {
+                    cols: tab.term.cols,
+                    rows: tab.term.rows,
+                    fixedGrid: tab.fixedGrid
+                        ? { cols: tab.fixedGrid.cols, rows: tab.fixedGrid.rows }
+                        : null,
+                    zoom: tab.fixedGridZoom,
+                    tabCount: tabService.tabs.length,
+                };
+            },
+        };
+    }
+
     disconnectOverlay.setup(async () => {
         try {
             // 1. Reconnect management and wait for state sync
@@ -528,6 +629,36 @@ async function init(): Promise<void> {
     setupSnippetsButton(openSnippets);
 
     setupFontSizeControls(tabService);
+    setupTapButton('btn-reset-view', () => {
+        const tab = tabService.activeTab;
+        if (tab) resetFixedTerminalView(tab);
+    });
+
+    // Zellij tab navigation: robust at any zoom (no aiming at tiny grid cells).
+    // Sends default zellij keys: Ctrl+T (tab mode) -> h/l (prev/next) -> Enter
+    // (back to normal). Only shown while a tab is Zellij-locked (fixedGrid).
+    const ZELLIJ_TABMODE = '\x14'; // Ctrl+T
+    const ZELLIJ_STEP_MS = 60;
+    const sendZellijTabSwitch = async (dir: 'h' | 'l') => {
+        const tab = tabService.activeTab;
+        if (!tab || !tab.fixedGrid) return;
+        inputHandler.sendInput(ZELLIJ_TABMODE);
+        await new Promise(r => setTimeout(r, ZELLIJ_STEP_MS));
+        inputHandler.sendInput(dir);
+        await new Promise(r => setTimeout(r, ZELLIJ_STEP_MS));
+        inputHandler.sendInput('\r');
+    };
+    const updateTabNavButtons = () => {
+        const isZellij = Boolean(tabService.activeTab?.fixedGrid);
+        for (const id of ['btn-tab-prev', 'btn-tab-next']) {
+            const btn = document.getElementById(id) as HTMLButtonElement | null;
+            if (btn) btn.hidden = !isZellij;
+        }
+    };
+    setupTapButton('btn-tab-prev', () => { void sendZellijTabSwitch('h'); });
+    setupTapButton('btn-tab-next', () => { void sendZellijTabSwitch('l'); });
+    window.addEventListener('ptn:fixedgridchange', updateTabNavButtons);
+    updateTabNavButtons();
 
     setupDesktopToolbarAutohide();
 
@@ -676,18 +807,34 @@ async function init(): Promise<void> {
         modifierManager.reset();
     });
 
-    // Handle visual viewport (mobile keyboard) - adjust app size for iOS
-    // Terminal refit is handled by ResizeObserver on terminal-container
+    // Keep the whole app inside the visible viewport while the mobile keyboard
+    // is open. Android also uses interactive-widget=resizes-content from the
+    // viewport meta tag; this remains necessary for iOS and older browsers.
+    // Terminal refit is handled by ResizeObserver on terminal-container.
     if (window.visualViewport) {
         const app = document.getElementById('app');
+        let viewportFrame: number | null = null;
+
         const updateAppSize = () => {
-            if (app) {
-                app.style.height = `${window.visualViewport!.height}px`;
-                app.style.transform = `translateY(${window.visualViewport!.offsetTop}px)`;
-            }
+            if (!app || viewportFrame !== null) return;
+
+            viewportFrame = requestAnimationFrame(() => {
+                viewportFrame = null;
+                const viewport = window.visualViewport;
+                if (!viewport) return;
+
+                app.style.position = 'fixed';
+                app.style.top = `${viewport.offsetTop}px`;
+                app.style.left = `${viewport.offsetLeft}px`;
+                app.style.width = `${viewport.width}px`;
+                app.style.height = `${viewport.height}px`;
+                app.style.transform = '';
+            });
         };
         window.visualViewport.addEventListener('resize', updateAppSize);
         window.visualViewport.addEventListener('scroll', updateAppSize);
+        window.addEventListener('resize', updateAppSize);
+        updateAppSize();
     }
 
     // Focus terminal on container click
@@ -707,16 +854,8 @@ async function init(): Promise<void> {
             }
         }, 100);
 
-        if (config.update_available) {
-            setTimeout(() => {
-                updateOverlay.show({
-                    currentVersion: config.version || 'unknown',
-                    latestVersion: config.latest_version || null,
-                    upgradeCommand: config.upgrade_command || null,
-                    updateAvailable: true,
-                });
-            }, 500);
-        }
+        // Update-available popup suppressed: update notifications are handled
+        // out-of-band, so we no longer interrupt startup with the overlay.
     } catch (e) {
         console.error('Failed to connect management WebSocket:', e);
         disconnectOverlay.show();

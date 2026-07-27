@@ -6,6 +6,23 @@
 import type { Terminal } from '@xterm/xterm';
 import type { TerminalPosition } from '@/types';
 
+/** One end of a selection, in both client pixels and viewport-relative cells. */
+export interface SelectionEndpoint {
+    /** Client X of the endpoint (left edge of the cell). */
+    x: number;
+    /** Client Y of the endpoint (baseline / bottom of the cell row). */
+    y: number;
+    /** Column of the endpoint. */
+    col: number;
+    /** Row of the endpoint, relative to the top of the viewport. */
+    row: number;
+}
+
+export interface SelectionEndpoints {
+    start: SelectionEndpoint;
+    end: SelectionEndpoint;
+}
+
 export interface SelectionHandler {
     /** Convert touch coordinates to terminal position */
     touchToPosition(terminal: Terminal, clientX: number, clientY: number): TerminalPosition;
@@ -33,6 +50,12 @@ export interface SelectionHandler {
 
     /** Check if terminal has selection */
     hasSelection(terminal: Terminal): boolean;
+
+    /** Select the whole visible screen (viewport rows only, no scrollback). */
+    selectVisibleScreen(terminal: Terminal): void;
+
+    /** Client-pixel + cell positions of the current selection's two endpoints. */
+    getSelectionEndpoints(terminal: Terminal): SelectionEndpoints | null;
 }
 
 /**
@@ -132,6 +155,39 @@ export function createSelectionHandler(): SelectionHandler {
 
         hasSelection(terminal: Terminal): boolean {
             return terminal.hasSelection();
+        },
+
+        selectVisibleScreen(terminal: Terminal): void {
+            const viewportY = Math.floor(terminal.buffer.active.viewportY);
+            terminal.select(0, viewportY, terminal.rows * terminal.cols);
+        },
+
+        getSelectionEndpoints(terminal: Terminal): SelectionEndpoints | null {
+            const pos = terminal.getSelectionPosition();
+            const rect = terminal.element?.getBoundingClientRect();
+            if (!pos || !rect) return null;
+
+            const cellWidth = rect.width / terminal.cols;
+            const cellHeight = rect.height / terminal.rows;
+            const viewportY = Math.floor(terminal.buffer.active.viewportY);
+
+            const clampX = (v: number): number => Math.max(rect.left, Math.min(rect.right, v));
+            const clampY = (v: number): number => Math.max(rect.top, Math.min(rect.bottom, v));
+            const toEndpoint = (col: number, absRow: number): SelectionEndpoint => {
+                const rowRel = absRow - viewportY;
+                return {
+                    x: clampX(rect.left + col * cellWidth),
+                    // Baseline of the cell row (bottom edge) so the handle hangs below it.
+                    y: clampY(rect.top + (rowRel + 1) * cellHeight),
+                    col: Math.max(0, Math.min(terminal.cols - 1, col)),
+                    row: rowRel,
+                };
+            };
+
+            return {
+                start: toEndpoint(pos.start.x, pos.start.y),
+                end: toEndpoint(pos.end.x, pos.end.y),
+            };
         },
     };
 }

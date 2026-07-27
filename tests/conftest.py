@@ -121,6 +121,7 @@ class FakePTY:
         self._output_queue: list[bytes] = []
         self._input_received: list[bytes] = []
         self._spawned = False
+        self._working_directory: str | None = None
 
     def spawn(self) -> None:
         self._spawned = True
@@ -141,6 +142,13 @@ class FakePTY:
 
     def is_echo_enabled(self) -> bool:
         return True
+
+    def get_working_directory(self) -> str | None:
+        return self._working_directory
+
+    @property
+    def process_id(self) -> int | None:
+        return 12345
 
     def close(self) -> None:
         self._alive = False

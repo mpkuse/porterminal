@@ -16,6 +16,7 @@ import type { ConnectionService } from './ConnectionService';
 import type { ManagementService } from './ManagementService';
 import { applyModifiers } from '@/input/KeyMapper';
 import { getTerminalFontSize } from '@/utils/storage';
+import { fitTerminalToContainer } from '@/terminal/TerminalLayout';
 
 export interface TabService {
     /** All tabs */
@@ -115,6 +116,92 @@ function shouldLetBrowserHandleKey(event: KeyboardEvent): boolean {
 }
 
 /**
+ * Bind an action that works for both direct touch input and mouse clicks.
+ *
+ * The app disables native touch handling so the terminal can own its gestures.
+ * On mobile browsers that can also suppress the synthetic click normally emitted
+ * after a tap, so controls in the tab bar must handle pointerup directly.
+ */
+let lastDirectTouchActionAt = 0;
+
+function bindTapAction(
+    element: HTMLElement,
+    onAction: () => void,
+    ignoreSelector?: string,
+): void {
+    const TAP_MOVE_TOLERANCE = 10;
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let moved = false;
+
+    const shouldIgnore = (target: EventTarget | null): boolean => {
+        return Boolean(
+            ignoreSelector
+            && target instanceof Element
+            && target.closest(ignoreSelector),
+        );
+    };
+
+    const resetPointer = (): void => {
+        pointerId = null;
+        moved = false;
+    };
+
+    element.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse' || shouldIgnore(event.target)) return;
+
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        moved = false;
+        event.preventDefault();
+    }, { passive: false });
+
+    element.addEventListener('pointermove', (event) => {
+        if (pointerId === null || event.pointerId !== pointerId) return;
+
+        if (
+            Math.abs(event.clientX - startX) > TAP_MOVE_TOLERANCE
+            || Math.abs(event.clientY - startY) > TAP_MOVE_TOLERANCE
+        ) {
+            moved = true;
+        }
+        event.preventDefault();
+    }, { passive: false });
+
+    element.addEventListener('pointerup', (event) => {
+        if (pointerId === null || event.pointerId !== pointerId) return;
+
+        event.preventDefault();
+        const shouldAct = !moved;
+        resetPointer();
+
+        if (shouldAct) {
+            lastDirectTouchActionAt = Date.now();
+            onAction();
+        }
+    }, { passive: false });
+
+    element.addEventListener('pointercancel', resetPointer);
+
+    element.addEventListener('click', (event) => {
+        if (shouldIgnore(event.target)) return;
+
+        // Some browsers still emit a compatibility click after pointerup.
+        const pointerType = (event as PointerEvent).pointerType;
+        if (
+            (pointerType && pointerType !== 'mouse')
+            || Date.now() - lastDirectTouchActionAt < 750
+        ) {
+            event.preventDefault();
+            return;
+        }
+        onAction();
+    });
+}
+
+/**
  * Create a tab service instance (backend-driven)
  */
 export function createTabService(
@@ -125,8 +212,8 @@ export function createTabService(
     defaultShellId: string,
     callbacks: {
         onInputSend: (data: string) => void;
-        onSelectionCopy: (text: string) => void;
         scheduleResize: (tab: Tab) => void;
+        onSelectionChange: () => void;
     }
 ): TabService {
     const tabs: Tab[] = [];
@@ -224,9 +311,25 @@ export function createTabService(
                     closeBtn.classList.remove('holding');
                 };
 
+                const finishHold = (e: PointerEvent) => {
+                    const shouldActivateTab = (
+                        !desktopQuery.matches
+                        && !isClosing
+                        && holdTimer !== null
+                    );
+                    cancelHold(e);
+
+                    // The close affordance occupies much of a compact mobile
+                    // tab. A short tap should still select the tab; only the
+                    // completed hold closes it.
+                    if (shouldActivateTab) {
+                        service.switchToTab(tab.id);
+                    }
+                };
+
                 // Pointer events for unified touch/mouse handling
                 closeBtn.addEventListener('pointerdown', startHold);
-                closeBtn.addEventListener('pointerup', cancelHold);
+                closeBtn.addEventListener('pointerup', finishHold);
                 closeBtn.addEventListener('pointercancel', cancelHold);
                 closeBtn.addEventListener('pointerleave', cancelHold);
                 closeBtn.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -244,7 +347,11 @@ export function createTabService(
                 tabBtn.appendChild(closeBtn);
             }
 
-            tabBtn.addEventListener('click', () => service.switchToTab(tab.id));
+            bindTapAction(
+                tabBtn,
+                () => service.switchToTab(tab.id),
+                '.tab-close',
+            );
             tabBar.appendChild(tabBtn);
         });
 
@@ -252,7 +359,7 @@ export function createTabService(
         const addBtn = document.createElement('button');
         addBtn.className = 'tab-btn tab-add';
         addBtn.textContent = '+';
-        addBtn.addEventListener('click', () => {
+        bindTapAction(addBtn, () => {
             service.requestCreateTab().catch(console.error);
         });
         tabBar.appendChild(addBtn);
@@ -347,6 +454,20 @@ export function createTabService(
             sessionId: serverTab.session_id,
             heartbeatInterval: null,
             reconnectAttempts: 0,
+            fixedGrid: null,
+            fixedGridBaseScale: 1,
+            fixedGridBaseScreenWidth: 0,
+            fixedGridBaseScreenHeight: 0,
+            fixedGridBaseFontSize: 0,
+            fixedGridFitSignature: '',
+            fixedGridZoom: 1,
+            fixedGridPanX: 0,
+            fixedGridPanY: 0,
+            fixedGridRenderScale: 0,
+            fixedGridContentWidth: 0,
+            fixedGridContentHeight: 0,
+            fontSizeBeforeFixedGrid: null,
+            cursorBlinkBeforeFixedGrid: null,
         };
 
         // iOS-specific event handlers (now that tab is defined)
@@ -427,12 +548,9 @@ export function createTabService(
             processAndSend(data);
         });
 
-        // Auto-copy on selection
+        // Selection change — drives the Copy bar for mouse (non-touch) selection.
         terminal.onSelectionChange(() => {
-            const selection = terminal.getSelection();
-            if (selection && selection.length > 0) {
-                callbacks.onSelectionCopy(selection);
-            }
+            callbacks.onSelectionChange();
         });
 
         // Handle resize
@@ -506,9 +624,10 @@ export function createTabService(
 
         async requestCreateTab(shellId?: string): Promise<Tab> {
             const shell = shellId ?? defaultShellId;
+            const sourceTabId = getActiveTab()?.tabId ?? undefined;
 
             // Request from server
-            const serverTab = await managementService.createTab(shell);
+            const serverTab = await managementService.createTab(shell, sourceTabId);
 
             // Server confirmed - create local rendering
             const tab = createLocalRender(serverTab);
@@ -556,16 +675,24 @@ export function createTabService(
             // Show selected
             tab.container.style.display = 'block';
             activeTabId = tabId;
+            // Refresh top-bar controls that depend on the active tab (e.g. the
+            // fixed-grid view-mode toggle).
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('ptn:fixedgridchange'));
+            }
 
             // Focus and fit - use rAF to ensure CSS layout is complete
             // Note: for new tabs, opacity is managed by ConnectionService after buffer flush
             tab.term.focus();
             requestAnimationFrame(() => {
-                tab.fitAddon.fit();
+                fitTerminalToContainer(tab);
 
-                // If already visible (reconnect/switch back), scroll to bottom
-                // Use onRender callbacks to handle xterm.js async buffer reflow
-                if (tab.container.style.opacity !== '0') {
+                // If already visible (reconnect/switch back), scroll to bottom.
+                // Use onRender callbacks to handle xterm.js async buffer reflow.
+                // Zellij-attached grids own an alternate screen with no
+                // scrollback, so the repeated scroll loop is pure wasted reflow
+                // on every switch - skip it for a smoother tab change.
+                if (tab.container.style.opacity !== '0' && !tab.fixedGrid) {
                     tab.term.scrollToBottom();
 
                     let count = 0;

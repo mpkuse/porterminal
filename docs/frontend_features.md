@@ -46,14 +46,27 @@ Location: `frontend/src/gestures/`
 
 ### Supported Gestures
 
+Gestures are separated by contact count rather than overloaded on context:
+one finger interacts and scrolls, two fingers move the camera. See
+`docs/design/gestures.md` for the full scheme and its rationale.
+
 | Gesture | Threshold | Behavior |
 |---------|-----------|----------|
-| Long-press | 250ms | Start text selection mode |
-| Double-tap | 300ms window, 30px distance | Word selection |
-| Horizontal swipe | 25px min, 300ms max, 1.2x ratio | Arrow key navigation |
-| Pinch-zoom | 2-finger touch | Font size adjustment (10-24px) |
+| Single tap | - | Click through to the app (mouse protocol), or focus |
+| Long-press | 250ms | Select the word under the finger, open the selection bar |
+| Drag while selected | 10px | Adjust the nearer selection endpoint |
+| Double-tap | 300ms window, 30px distance | Zoom toggle at the tapped point (fixed grid only) |
+| 1-finger drag | 10px | Scroll the pane under the finger |
+| 2-finger drag | 10px of midpoint travel | Pan a zoomed fixed grid, else scroll |
+| Pinch-zoom | 12% distance change | Fixed grid: zoom 1-4x. Reflow: font size (10-24px) |
 | Momentum scroll | 0.95 deceleration per frame | Physics-based smooth scrolling |
-| Single tap | - | Clear selection, focus terminal |
+| Ctrl/Cmd + wheel | - | Zoom a fixed grid at the pointer (mouse / DeX) |
+| Middle-button drag | - | Pan a zoomed fixed grid (mouse / DeX) |
+
+Taps and wheel events are forwarded through xterm's mouse protocol so an
+alternate-screen application (Zellij) receives them against the correct cell.
+The synthetic dispatch is flagged rather than clearing the touch-active flag,
+so the ghost click iOS synthesises after a touch stays suppressed.
 
 ### Momentum Scroll Algorithm
 
@@ -193,9 +206,10 @@ const row = Math.floor(y / cellHeight);
 
 ### Features
 - Multi-line selection with anchor tracking
-- Word boundary expansion on double-tap
+- Word boundary expansion on long-press
 - Viewport offset handling for scrollback
-- Floating copy button at touch release point
+- Endpoint positions in client pixels, for placing the selection handles
+- Persistent top action bar (`ui/SelectionBar.ts`): Copy / Paste / All / dismiss
 
 ---
 
@@ -274,6 +288,53 @@ Location: `frontend/src/terminal/ResizeManager.ts`
 
 ---
 
+## 13a. Fixed Grid (Shared Zellij Sessions)
+
+Location: `frontend/src/terminal/TerminalLayout.ts`
+
+Normally the browser owns its terminal size and `FitAddon` picks rows and
+columns to suit the viewport. When several clients share one Zellij session
+that breaks down: Zellij renders every client at the minimum size across all
+of them, so the smallest screen would shrink everyone else. The server
+therefore picks one authoritative grid and pins the followers to it
+(`zellij_size_lock` / `zellij_size_unlock` on the data plane).
+
+A pinned tab keeps those logical rows and columns and changes only its own
+presentation:
+
+| Step | What happens |
+|------|--------------|
+| Fit | Binary search (10 steps) for the largest font whose grid still fits |
+| Fill | A residual uniform scale absorbs cell-rounding gaps at small fonts |
+| Zoom | 1-4x, re-rasterised at a larger font rather than CSS-scaled |
+| Pan | A plain `translate`, clamped so content never leaves empty space |
+
+### Why zoom re-rasterises
+
+CSS-scaling the canvas is cheaper but blurry, and worse, xterm decodes pointer
+coordinates using its *unscaled* cell size and ignores CSS transforms. Any
+residual scale on `term.element` makes a click land on `visualCell x scale` -
+the wrong cell, and so the wrong Zellij tab. Baking the full visual scale
+(fill x zoom) into the font leaves the element carrying only a translate, which
+keeps xterm's own coordinate math correct for both touch and mouse. Only
+extreme zoom, where the font hits its cap, leaves a residual scale; the touch
+path inverts it explicitly as a safety net.
+
+During an active pinch the cheap CSS preview is used for responsiveness and
+re-rasterised once on release.
+
+### Invariants
+
+- Font and CSS changes never propagate a resize: presentation is local, the
+  grid is shared. `ResizeManager` drops resizes for a pinned tab, and the font
+  controls record the preference without applying it.
+- A resize reports the browser's *natural* grid to the server, which is what
+  the authority is computed from - not the grid currently being rendered.
+- Zoom and pan persist per tab across switches; a fit signature lets an
+  unchanged container skip the font search entirely.
+
+---
+
 ## 14. Clipboard Management
 
 Location: `frontend/src/clipboard/ClipboardManager.ts`
@@ -304,7 +365,7 @@ interface EventMap {
     'tab:created': { tab: Tab };
     'tab:switched': { tabId: number; tab: Tab };
     'modifier:changed': { modifier: ModifierKey; state: ModifierMode };
-    'gesture:swipe': { direction: SwipeDirection };
+    'gesture:pinch': { scale: number };
     // ...
 }
 ```
@@ -333,7 +394,7 @@ Different tunnel URLs get separate credential storage. Graceful fallback when lo
 
 | Category | Count |
 |----------|-------|
-| Gesture types | 6 |
+| Gesture types | 10 |
 | iOS workarounds | 4 |
 | Buffer strategies | 3 |
 | State machines | 3 |
@@ -352,11 +413,12 @@ Different tunnel URLs get separate credential storage. Graceful fallback when lo
 | `frontend/src/services/TabService.ts` | Terminal rendering |
 | `frontend/src/gestures/GestureRecognizer.ts` | Touch gesture handling |
 | `frontend/src/gestures/SelectionHandler.ts` | Text selection |
-| `frontend/src/gestures/SwipeDetector.ts` | Swipe detection |
 | `frontend/src/input/ModifierManager.ts` | Modifier state machine |
 | `frontend/src/input/KeyMapper.ts` | Key sequence mapping |
 | `frontend/src/config/keys.ts` | Button configuration |
 | `frontend/src/clipboard/ClipboardManager.ts` | Copy/paste operations |
 | `frontend/src/terminal/ResizeManager.ts` | Resize coordination |
+| `frontend/src/terminal/TerminalLayout.ts` | Fitting, fixed-grid zoom and pan |
+| `frontend/src/ui/SelectionBar.ts` | Selection action bar and handles |
 | `frontend/src/core/events.ts` | Event bus |
 | `frontend/src/ui/*.ts` | UI overlay components |

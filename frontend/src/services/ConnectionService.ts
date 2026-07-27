@@ -14,6 +14,7 @@
 import type { Tab, ConnectionState } from '@/types';
 import type { EventBus } from '@/core/events';
 import { getClientTabId } from '@/utils/storage';
+import { fitTerminalToContainer, setFixedTerminalGrid } from '@/terminal/TerminalLayout';
 
 export interface ConnectionConfig {
     maxReconnectAttempts: number;
@@ -426,7 +427,7 @@ export function createConnectionService(
                 requestAnimationFrame(() => {
                     if (state.state !== 'connecting') return;
 
-                    tab.fitAddon.fit();
+                    fitTerminalToContainer(tab);
                     // Send resize IMMEDIATELY after fit, before flushing buffer.
                     // This ensures server knows current dimensions before we render
                     // buffered output that may have wrong cursor position.
@@ -501,11 +502,22 @@ export function createConnectionService(
                         switch (msg.type) {
                             case 'session_info':
                                 callbacks.onSessionInfo(tab, msg.session_id, msg.tab_id ?? null);
+                                if (msg.zellij_size_lock?.cols && msg.zellij_size_lock?.rows) {
+                                    setFixedTerminalGrid(tab, msg.zellij_size_lock);
+                                }
                                 // Sync terminal dimensions if server provides them
                                 // This ensures new clients adapt to existing session dimensions
                                 if (msg.cols && msg.rows) {
                                     syncTerminalSize(tab, msg.cols, msg.rows);
                                 }
+                                break;
+                            case 'zellij_size_lock':
+                                if (msg.cols && msg.rows) {
+                                    setFixedTerminalGrid(tab, { cols: msg.cols, rows: msg.rows });
+                                }
+                                break;
+                            case 'zellij_size_unlock':
+                                setFixedTerminalGrid(tab, null);
                                 break;
                             case 'resize_sync':
                                 // Server rejected our resize or is syncing dimensions

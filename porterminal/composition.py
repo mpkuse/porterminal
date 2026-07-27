@@ -23,6 +23,7 @@ from porterminal.domain import (
 from porterminal.infrastructure.config import ConfigService, ShellDetector
 from porterminal.infrastructure.registry import UserConnectionRegistry
 from porterminal.infrastructure.repositories import InMemorySessionRepository, InMemoryTabRepository
+from porterminal.infrastructure.zellij import NativeZellijClientDetector
 
 
 def create_pty_factory(
@@ -99,6 +100,13 @@ class PTYManagerAdapter:
 
     def is_echo_enabled(self) -> bool:
         return self._manager.is_echo_enabled()
+
+    def get_working_directory(self) -> str | None:
+        return self._manager.get_working_directory()
+
+    @property
+    def process_id(self) -> int | None:
+        return self._manager.process_id
 
     def close(self) -> None:
         self._manager.close()
@@ -193,7 +201,14 @@ def create_container(
         limit_checker=TabLimitChecker(),
     )
 
-    terminal_service = TerminalService()
+    zellij_detector = NativeZellijClientDetector()
+    terminal_service = TerminalService(
+        zellij_client_running_provider=zellij_detector.has_descendant_client,
+        zellij_native_sizes_provider=zellij_detector.native_client_sizes,
+        zellij_session_under_pty_provider=zellij_detector.zellij_session_under_pty,
+        zellij_snapshot_refresher=zellij_detector.refresh,
+        zellij_detach_provider=zellij_detector.detach_client,
+    )
 
     # Create a shell provider closure for ManagementService
     def get_shell(shell_id: str | None) -> ShellCommand | None:

@@ -28,11 +28,24 @@ export function createResizeManager(
             const existingTimeout = pending.get(tab.id);
             if (existingTimeout) {
                 clearTimeout(existingTimeout);
+                pending.delete(tab.id);
+            }
+
+            // A native Zellij attachment owns the logical grid. Font and CSS
+            // changes in the browser are presentation-only and must never
+            // propagate a resize to the shared Zellij session.
+            if (tab.fixedGrid) {
+                return;
             }
 
             // Schedule new resize
             const timeout = setTimeout(() => {
                 pending.delete(tab.id);
+
+                // The lock may have arrived after this resize was scheduled.
+                if (tab.fixedGrid) {
+                    return;
+                }
 
                 const cols = tab.term.cols;
                 const rows = tab.term.rows;

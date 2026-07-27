@@ -66,6 +66,20 @@ INTERACTIVE_THRESHOLD = 64  # Bytes - flush immediately for very small data
 MAX_INPUT_SIZE = 4096
 FLOW_PAUSE_TIMEOUT = 5.0  # seconds - auto-resume if client stops sending ACKs (was 15s)
 LOCAL_ECHO_MAX_BYTES = 128
+ZELLIJ_MONITOR_INTERVAL = 0.1
+ZELLIJ_CLIENT_START_TIMEOUT = 5.0
+ZELLIJ_DISCONNECT_GRACE_SECONDS = 2.0
+# How often to detect which Zellij session each live PTY is attached to, so the
+# size authority reconciles however zellij was started. Each tick costs a process
+# scan, so the cadence follows what the user is doing: pressing Enter may have
+# started (or ended) an attach, so watch closely for a moment afterwards and idle
+# slowly the rest of the time.
+ZELLIJ_SWEEP_INTERVAL_IDLE = 1.0
+ZELLIJ_SWEEP_INTERVAL_ACTIVE = 0.15
+# How long an Enter keeps the sweep at its attentive cadence. A `zellij attach`
+# needs a moment to launch and connect its socket, so one immediate check is not
+# enough to catch it.
+ZELLIJ_SWEEP_ACTIVE_WINDOW = 2.5
 
 
 class AsyncioClock:
@@ -86,9 +100,39 @@ class TerminalService:
         self,
         rate_limit_config: RateLimitConfig | None = None,
         max_input_size: int = MAX_INPUT_SIZE,
+        zellij_client_running_provider: Callable[[int], bool] | None = None,
+        zellij_native_sizes_provider: (
+            Callable[[str], list[TerminalDimensions]] | None
+        ) = None,
+        zellij_session_under_pty_provider: (
+            Callable[[int], str | None] | None
+        ) = None,
+        zellij_snapshot_refresher: Callable[[], None] | None = None,
+        zellij_detach_provider: Callable[[int], bool] | None = None,
     ) -> None:
         self._rate_limit_config = rate_limit_config or RateLimitConfig()
         self._max_input_size = max_input_size
+        self._zellij_client_running_provider = zellij_client_running_provider
+        # Session-scoped sizes of native (non-Porterminal) clients on a Zellij
+        # session; drives the "largest client wins" authority below.
+        self._zellij_native_sizes_provider = zellij_native_sizes_provider
+        # Resolves which Zellij session a PTY's shell has actually attached to.
+        # This is the only attach detection there is: it reads process and socket
+        # state rather than reconstructing what the user typed, so it is correct
+        # for tab completion, paste, snippets and shell-rc auto-attach alike, and
+        # it reports the session actually joined rather than the name asked for.
+        self._zellij_session_under_pty_provider = zellij_session_under_pty_provider
+        # The providers above answer from a snapshot of the process table and open
+        # sockets. Collecting that snapshot is blocking and costs tens of
+        # milliseconds, so it is refreshed once per pass in a worker thread rather
+        # than being re-collected inline by every provider call.
+        self._zellij_snapshot_refresher = zellij_snapshot_refresher
+        # Ends the Zellij client attached under a PTY, used when the last browser
+        # viewing that tab goes away.
+        self._zellij_detach_provider = zellij_detach_provider
+        self._zellij_sweep_task: asyncio.Task[None] | None = None
+        # Loop time until which the sweep stays at its attentive cadence.
+        self._zellij_sweep_active_until = 0.0
 
         # Multi-client support: track connections and read loops per session
         self._session_connections: dict[str, set[ConnectionPort]] = {}
@@ -97,7 +141,20 @@ class TerminalService:
         self._session_locks: dict[str, asyncio.Lock] = {}
         # Per-connection flow control state (watermark-based backpressure)
         self._flow_state: dict[ConnectionPort, ConnectionFlowState] = {}
+        self._zellij_size_locks: dict[str, TerminalDimensions] = {}
+        self._zellij_monitor_tasks: dict[str, asyncio.Task[None]] = {}
+        self._zellij_disconnect_tasks: dict[str, asyncio.Task[None]] = {}
+        # Live session objects (needed to reconcile the size of OTHER tabs that
+        # share one Zellij session), the Zellij session name each PTY attached
+        # to, and each browser's natural (unconstrained) grid.
+        self._sessions: dict[str, Session[PTYPort]] = {}
+        self._session_zellij_name: dict[str, str] = {}
+        self._session_natural: dict[str, TerminalDimensions] = {}
         self._on_session_exited: Callable[[Session], Awaitable[None]] | None = None
+
+    def get_zellij_size_lock(self, session_id: str) -> TerminalDimensions | None:
+        """Return the native-client grid currently protecting a session."""
+        return self._zellij_size_locks.get(session_id)
 
     def set_on_session_exited(
         self,
@@ -120,6 +177,9 @@ class TerminalService:
 
     def _register_connection(self, session_id: str, connection: ConnectionPort) -> int:
         """Register a connection for a session. Returns connection count."""
+        pending_detach = self._zellij_disconnect_tasks.pop(session_id, None)
+        if pending_detach and not pending_detach.done():
+            pending_detach.cancel()
         connections = self._session_connections.setdefault(session_id, set())
         connections.add(connection)
         # Initialize flow control state for this connection
@@ -251,6 +311,11 @@ class TerminalService:
         async with lock:
             connection_count = self._register_connection(session_id, connection)
             is_first_client = connection_count == 1
+            # Remember the session object so we can reconcile the size of other
+            # tabs sharing the same Zellij session, and make sure the attach
+            # sweep is running.
+            self._sessions[session_id] = session
+            self._ensure_zellij_sweep()
 
             logger.info(
                 "Client connected session_id=%s connection_count=%d",
@@ -294,8 +359,16 @@ class TerminalService:
 
             # Last client: stop the read loop and cleanup lock
             if remaining == 0:
+                zname = self._session_zellij_name.get(session_id)
+                self._schedule_zellij_detach_on_disconnect(session, session_id)
                 await self._stop_broadcast_read_loop(session_id)
                 self._cleanup_session_lock(session_id)
+                # No longer an active viewer; drop from the sweep set.
+                self._sessions.pop(session_id, None)
+                # Recompute authority for the remaining viewers of this Zellij
+                # session (e.g. the laptop left -> the phone becomes the driver).
+                if zname is not None:
+                    await self._reconcile_zellij_group(zname)
 
     def _start_broadcast_read_loop(
         self,
@@ -436,6 +509,12 @@ class TerminalService:
 
         # Notify all clients if PTY died
         if not session.pty_handle.is_alive():
+            zname = self._session_zellij_name.pop(session_id, None)
+            self._session_natural.pop(session_id, None)
+            self._sessions.pop(session_id, None)
+            await self._release_zellij_size_lock(session_id)
+            if zname is not None:
+                await self._reconcile_zellij_group(zname)
             if has_connections():
                 await self._broadcast_output(session_id, b"\r\n[Shell exited]\r\n")
             if self._on_session_exited:
@@ -493,6 +572,7 @@ class TerminalService:
             return
 
         if rate_limiter.try_acquire(len(filtered)):
+            self._note_zellij_relevant_input(filtered)
             await self._optimistic_echo(session, connection, filtered)
             session.pty_handle.write(filtered)
             session.touch(datetime.now(UTC))
@@ -504,6 +584,351 @@ class TerminalService:
                 }
             )
             logger.warning("Rate limit exceeded session_id=%s", session.id)
+
+    def _note_zellij_relevant_input(self, data: bytes) -> None:
+        """Raise the sweep cadence briefly after the user submits a line.
+
+        Pressing Enter is the moment a shell may start or end a Zellij attach, so
+        it is worth looking more often for a couple of seconds. Only the presence
+        of a newline is used - nothing about what was typed is inspected or kept.
+        """
+        if b"\r" not in data and b"\n" not in data:
+            return
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            return
+        self._zellij_sweep_active_until = now + ZELLIJ_SWEEP_ACTIVE_WINDOW
+
+    def _zellij_sweep_interval(self) -> float:
+        """Attentive right after a submitted line, idle otherwise."""
+        if asyncio.get_running_loop().time() < self._zellij_sweep_active_until:
+            return ZELLIJ_SWEEP_INTERVAL_ACTIVE
+        return ZELLIJ_SWEEP_INTERVAL_IDLE
+
+    def _zellij_members(self, zname: str) -> list[str]:
+        """Session ids actively viewing ``zname`` (alive PTY + a live browser)."""
+        members = []
+        for sid, name in self._session_zellij_name.items():
+            if name != zname:
+                continue
+            sess = self._sessions.get(sid)
+            if sess is None or not sess.pty_handle.is_alive():
+                continue
+            if not self._session_connections.get(sid):
+                continue
+            members.append(sid)
+        return members
+
+    def _zellij_authority(self, zname: str, members: list[str]) -> TerminalDimensions | None:
+        """The grid every viewer of ``zname`` should use.
+
+        A native (non-Porterminal) client caps the grid at the native minimum —
+        Zellij renders the min across all clients and we cannot grow someone
+        else's terminal. With no native client, the largest browser wins and the
+        smaller browsers scale locally.
+        """
+        natives: list[TerminalDimensions] = []
+        if self._zellij_native_sizes_provider is not None:
+            try:
+                natives = self._zellij_native_sizes_provider(zname)
+            except Exception:
+                logger.exception("Failed to read native Zellij client sizes zname=%s", zname)
+                natives = []
+        if natives:
+            # Zellij renders the independent min across all clients; match it so
+            # our browsers stay consistent with the native terminal.
+            return TerminalDimensions.clamped(
+                min(d.cols for d in natives), min(d.rows for d in natives)
+            )
+        # No native client: the largest browser (by area) wins and keeps its
+        # EXACT grid. Adopting one client's rectangle (rather than the per-axis
+        # max) guarantees that client is an unlocked "driver" whose terminal is
+        # never resized — the others lock to it and scale locally.
+        def natural_of(sid: str) -> TerminalDimensions:
+            return self._session_natural.get(sid) or self._sessions[sid].dimensions
+
+        if not members:
+            return None
+        driver = max(members, key=lambda s: (natural_of(s).cols * natural_of(s).rows))
+        chosen = natural_of(driver)
+        return TerminalDimensions.clamped(chosen.cols, chosen.rows)
+
+    async def _refresh_zellij_snapshot(self) -> None:
+        """Bring the providers' view of processes and sockets up to date.
+
+        The collection is blocking, so it runs in a worker thread; the providers
+        then answer from that snapshot without touching the event loop. Callers
+        within one snapshot window share a single collection.
+        """
+        refresher = self._zellij_snapshot_refresher
+        if refresher is None:
+            return
+        try:
+            await asyncio.to_thread(refresher)
+        except Exception:
+            # A stale snapshot degrades detection but must never break I/O.
+            logger.exception("Failed to refresh Zellij process snapshot")
+
+    async def _reconcile_zellij_group(self, zname: str) -> None:
+        """Pin every viewer of ``zname`` to the authoritative grid; lock the ones
+        smaller than it so they scale/pan locally instead of shrinking Zellij."""
+        members = self._zellij_members(zname)
+        if not members:
+            return
+        await self._refresh_zellij_snapshot()
+        authority = self._zellij_authority(zname, members)
+        if authority is None:
+            return
+        for sid in members:
+            session = self._sessions[sid]
+            if session.dimensions != authority:
+                session.update_dimensions(authority)
+                session.pty_handle.resize(authority)
+                session.touch(datetime.now(UTC))
+            natural = self._session_natural.get(sid) or authority
+            # Anyone whose own grid differs from the authority renders it in
+            # fixed-grid mode (smaller screens scale/pan; larger screens just
+            # use a bigger font). Only an exact-size client is an unlocked driver.
+            is_follower = natural != authority
+            if is_follower:
+                if self._zellij_size_locks.get(sid) != authority:
+                    self._zellij_size_locks[sid] = authority
+                    await self._broadcast_message(
+                        sid,
+                        {"type": "zellij_size_lock", "cols": authority.cols, "rows": authority.rows},
+                    )
+            elif sid in self._zellij_size_locks:
+                del self._zellij_size_locks[sid]
+                await self._broadcast_message(sid, {"type": "zellij_size_unlock"})
+        logger.info(
+            "Reconciled Zellij group zname=%s authority=%dx%d members=%d",
+            zname,
+            authority.cols,
+            authority.rows,
+            len(members),
+        )
+
+    def _ensure_zellij_sweep(self) -> None:
+        """Start the background attach-detection sweep if it is not running."""
+        if self._zellij_session_under_pty_provider is None:
+            return
+        task = self._zellij_sweep_task
+        if task is not None and not task.done():
+            return
+        self._zellij_sweep_task = asyncio.create_task(self._zellij_sweep_loop())
+
+    async def _zellij_sweep_loop(self) -> None:
+        try:
+            while self._sessions:
+                try:
+                    await self._zellij_sweep_once()
+                except Exception:
+                    logger.exception("Zellij attach sweep tick failed")
+                await asyncio.sleep(self._zellij_sweep_interval())
+        finally:
+            self._zellij_sweep_task = None
+
+    async def _zellij_sweep_once(self) -> None:
+        """Detect which Zellij session each live PTY is attached to and keep the
+        group membership (and thus the size authority) in sync — regardless of
+        how zellij was launched in that tab."""
+        provider = self._zellij_session_under_pty_provider
+        if provider is None:
+            return
+        # One collection for the whole tick: without this each session below would
+        # re-scan /proc and re-run `ss` on the event loop.
+        await self._refresh_zellij_snapshot()
+        affected: set[str] = set()
+        for sid, session in list(self._sessions.items()):
+            if not self._session_connections.get(sid) or not session.pty_handle.is_alive():
+                continue
+            root_pid = session.pty_handle.process_id
+            if root_pid is None:
+                continue
+            try:
+                actual = provider(root_pid)
+            except Exception:
+                logger.exception("Failed to resolve Zellij session for pty sid=%s", sid)
+                continue
+            current = self._session_zellij_name.get(sid)
+            if actual == current:
+                continue
+            if actual is not None:
+                # Attached (or moved to a different session) by any means.
+                self._session_zellij_name[sid] = actual
+                self._session_natural.setdefault(sid, session.dimensions)
+                affected.add(actual)
+                # Watch this client closely so the grid is released promptly when
+                # it goes. Detaching from inside Zellij submits no line, so the
+                # sweep's own cadence would stay at its idle interval.
+                self._start_zellij_client_monitor(session, sid)
+            else:
+                # The tab's Zellij client is gone: drop it from the group.
+                self._session_zellij_name.pop(sid, None)
+                await self._release_zellij_size_lock(sid)
+            if current is not None:
+                affected.add(current)
+        for zname in affected:
+            await self._reconcile_zellij_group(zname)
+
+    def _start_zellij_client_monitor(
+        self,
+        session: Session[PTYPort],
+        session_id: str,
+    ) -> None:
+        if self._zellij_client_running_provider is None:
+            return
+        root_pid = session.pty_handle.process_id
+        if root_pid is None:
+            return
+
+        previous = self._zellij_monitor_tasks.pop(session_id, None)
+        if previous and not previous.done():
+            previous.cancel()
+
+        task = asyncio.create_task(self._monitor_zellij_client(session_id, root_pid))
+        self._zellij_monitor_tasks[session_id] = task
+
+    async def _monitor_zellij_client(self, session_id: str, root_pid: int) -> None:
+        """Ungroup + release the lock when this PTY's attached Zellij client exits.
+
+        Runs for a locked (legacy) session OR a grouped one (a grouped *driver*
+        holds no lock, so we cannot key the loop on the lock alone).
+        """
+        running_provider = self._zellij_client_running_provider
+        if running_provider is None:
+            return
+        saw_client = False
+        started_at = asyncio.get_running_loop().time()
+        current_task = asyncio.current_task()
+        try:
+            while (
+                session_id in self._zellij_size_locks
+                or session_id in self._session_zellij_name
+            ):
+                # Keep the process scan off the event loop. Monitors for other
+                # sessions polling in the same window reuse this snapshot, so the
+                # cost does not grow with the number of attached tabs.
+                await self._refresh_zellij_snapshot()
+                try:
+                    client_running = bool(running_provider(root_pid))
+                except Exception:
+                    logger.exception(
+                        "Failed to monitor Zellij client process session_id=%s",
+                        session_id,
+                    )
+                    return
+
+                if client_running:
+                    saw_client = True
+                elif saw_client:
+                    await self._on_zellij_client_exited(session_id)
+                    return
+                elif (
+                    asyncio.get_running_loop().time() - started_at
+                    >= ZELLIJ_CLIENT_START_TIMEOUT
+                ):
+                    # The attach command failed or never launched; do not leave
+                    # a stale fixed grid on the ordinary shell.
+                    await self._on_zellij_client_exited(session_id)
+                    return
+
+                await asyncio.sleep(ZELLIJ_MONITOR_INTERVAL)
+        finally:
+            if self._zellij_monitor_tasks.get(session_id) is current_task:
+                self._zellij_monitor_tasks.pop(session_id, None)
+
+    async def _on_zellij_client_exited(self, session_id: str) -> None:
+        """This PTY's Zellij client is gone: drop it from its group, release any
+        lock, and recompute authority for the tabs that remain."""
+        zname = self._session_zellij_name.pop(session_id, None)
+        self._session_natural.pop(session_id, None)
+        await self._release_zellij_size_lock(session_id)
+        if zname is not None:
+            await self._reconcile_zellij_group(zname)
+
+    def _schedule_zellij_detach_on_disconnect(
+        self,
+        session: Session[PTYPort],
+        session_id: str,
+    ) -> None:
+        """Detach a Zellij attach after its last browser viewer leaves."""
+        if (
+            session_id not in self._zellij_size_locks
+            and session_id not in self._session_zellij_name
+        ):
+            return
+
+        previous = self._zellij_disconnect_tasks.pop(session_id, None)
+        if previous and not previous.done():
+            previous.cancel()
+        self._zellij_disconnect_tasks[session_id] = asyncio.create_task(
+            self._detach_zellij_after_disconnect(session, session_id)
+        )
+
+    async def _detach_zellij_after_disconnect(
+        self,
+        session: Session[PTYPort],
+        session_id: str,
+    ) -> None:
+        """Allow brief network reconnects, then detach an unviewed native session."""
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(ZELLIJ_DISCONNECT_GRACE_SECONDS)
+            if self._session_connections.get(session_id):
+                return
+            if (
+                session_id not in self._zellij_size_locks
+                and session_id not in self._session_zellij_name
+            ):
+                return
+            if not session.pty_handle.is_alive():
+                return
+
+            detach = self._zellij_detach_provider
+            root_pid = session.pty_handle.process_id
+            if detach is None or root_pid is None:
+                return
+
+            # Ask the Zellij client under this PTY to exit, rather than typing a
+            # detach keybinding into the shell. The keybinding is configurable, so
+            # sending one blind risks delivering the keystrokes to whatever
+            # application happens to be focused inside the session.
+            await self._refresh_zellij_snapshot()
+            try:
+                detached = await asyncio.to_thread(detach, root_pid)
+            except Exception:
+                logger.exception(
+                    "Failed to detach Zellij client session_id=%s", session_id
+                )
+                return
+            if detached:
+                session.touch(datetime.now(UTC))
+                logger.info(
+                    "Detached Zellij client after last browser disconnected "
+                    "session_id=%s",
+                    session_id,
+                )
+        finally:
+            if self._zellij_disconnect_tasks.get(session_id) is current_task:
+                self._zellij_disconnect_tasks.pop(session_id, None)
+
+    async def _release_zellij_size_lock(self, session_id: str) -> None:
+        if self._zellij_size_locks.pop(session_id, None) is None:
+            return
+        disconnect_task = self._zellij_disconnect_tasks.pop(session_id, None)
+        if (
+            disconnect_task
+            and disconnect_task is not asyncio.current_task()
+            and not disconnect_task.done()
+        ):
+            disconnect_task.cancel()
+        monitor_task = self._zellij_monitor_tasks.pop(session_id, None)
+        if monitor_task and monitor_task is not asyncio.current_task() and not monitor_task.done():
+            monitor_task.cancel()
+        await self._broadcast_message(session_id, {"type": "zellij_size_unlock"})
+        logger.info("Released native Zellij dimension lock session_id=%s", session_id)
 
     async def _optimistic_echo(
         self,
@@ -558,6 +983,15 @@ class TerminalService:
                 flow.paused = False
                 flow.pause_time = None
                 logger.debug("Connection resumed (client caught up) session_id=%s", session.id)
+        elif msg_type == "zellij_size_unlock":
+            # Browser buffer transitions are not authoritative. In particular,
+            # mobile rendering changes can transiently switch xterm buffers.
+            # The process monitor releases the lock only after the attached
+            # Zellij client actually exits.
+            logger.debug(
+                "Ignoring browser Zellij unlock request session_id=%s",
+                session.id,
+            )
         else:
             logger.warning("Unknown message type session_id=%s type=%s", session.id, msg_type)
 
@@ -580,6 +1014,37 @@ class TerminalService:
         rows = int(message.get("rows", 30))
 
         new_dims = TerminalDimensions.clamped(cols, rows)
+
+        # A resize always reports the browser's natural (unconstrained) grid.
+        # For a tab sharing a Zellij session, the group authority decides the
+        # real grid — the browser never resizes Zellij directly — so record the
+        # natural size and reconcile.
+        self._session_natural[session_id] = new_dims
+        zname = self._session_zellij_name.get(session_id)
+        if zname is not None:
+            await self._reconcile_zellij_group(zname)
+            return
+
+        # Legacy native size lock (un-named `zellij a`): reject changes.
+        locked_dimensions = self._zellij_size_locks.get(session_id)
+        if locked_dimensions is not None and new_dims != locked_dimensions:
+            logger.info(
+                "Resize rejected (native Zellij size lock) session_id=%s requested=%dx%d "
+                "locked=%dx%d",
+                session.id,
+                new_dims.cols,
+                new_dims.rows,
+                locked_dimensions.cols,
+                locked_dimensions.rows,
+            )
+            await connection.send_message(
+                {
+                    "type": "resize_sync",
+                    "cols": locked_dimensions.cols,
+                    "rows": locked_dimensions.rows,
+                }
+            )
+            return
 
         # Skip if same as current
         if session.dimensions == new_dims:

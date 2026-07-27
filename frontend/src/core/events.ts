@@ -3,7 +3,7 @@
  * Follows the Dependency Inversion principle - modules depend on events, not each other
  */
 
-import type { Tab, SwipeDirection, ModifierMode } from '@/types';
+import type { Tab, ModifierMode } from '@/types';
 
 /** Event payload types */
 export interface EventMap {
@@ -25,7 +25,6 @@ export interface EventMap {
     'modifier:changed': { modifier: 'ctrl' | 'alt' | 'shift'; state: ModifierMode };
 
     // Gesture events
-    'gesture:swipe': { direction: SwipeDirection };
     'gesture:pinch': { scale: number };
 }
 

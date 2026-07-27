@@ -20,51 +20,29 @@ const MAX_FONT_SIZE = 32;
 const FONT_STEP = 1;
 
 /**
- * Detect and remove duplicated content in text.
- * xterm.js buffer can contain duplicates during rapid output or resize.
+ * Guard against the specific xterm.js artifact where the entire captured screen
+ * is emitted twice back-to-back (can happen during rapid output / reflow):
+ * "block A\nblock A" collapses to "block A".
  *
- * Strategy: Find the longest repeated suffix and remove it.
- * If text is "ABC...XYZ...ABC...XYZ", we want "ABC...XYZ".
+ * Deliberately conservative: it only fires when the whole text is exactly two
+ * identical multi-line halves. It must NOT touch legitimate repetition —
+ * repeated tokens on one line (e.g. a long `====` rule), progress logs, ASCII
+ * art, `yes` output — which the reader has to preserve verbatim. (The old
+ * character-level heuristic collapsed any string whose halves matched and so
+ * silently destroyed such content.)
  */
 function removeDuplicates(text: string): string {
-    if (text.length < 100) return text;
-
-    // Check if the second half is a repeat of the first half
-    const len = text.length;
-    for (let splitPoint = Math.floor(len / 2); splitPoint > len / 4; splitPoint--) {
-        const firstHalf = text.slice(0, splitPoint);
-        const secondHalf = text.slice(splitPoint, splitPoint * 2);
-
-        if (firstHalf === secondHalf) {
-            // Found duplicate - return first half plus any remainder
-            const remainder = text.slice(splitPoint * 2);
-            return removeDuplicates(firstHalf + remainder);
-        }
-    }
-
-    // Also check for repeated blocks at line level
     const lines = text.split('\n');
-    if (lines.length < 6) return text;
+    const n = lines.length;
+    // Require a sizeable, even block so uniform-but-legitimate output does not
+    // accidentally look like a doubled screen.
+    if (n < 8 || n % 2 !== 0) return text;
 
-    // Look for point where content starts repeating
-    for (let splitIdx = Math.floor(lines.length / 2); splitIdx > lines.length / 4; splitIdx--) {
-        let isRepeat = true;
-        const blockSize = Math.min(splitIdx, lines.length - splitIdx);
-
-        for (let j = 0; j < blockSize; j++) {
-            if (lines[j] !== lines[splitIdx + j]) {
-                isRepeat = false;
-                break;
-            }
-        }
-
-        if (isRepeat) {
-            // Content from splitIdx onwards is a repeat
-            return lines.slice(0, splitIdx).join('\n');
-        }
+    const half = n / 2;
+    for (let i = 0; i < half; i++) {
+        if (lines[i] !== lines[i + half]) return text;
     }
-
-    return text;
+    return lines.slice(0, half).join('\n');
 }
 
 /**
@@ -128,6 +106,12 @@ function getTerminalText(term: Terminal): string {
     return removeDuplicates(logicalLines.join('\n'));
 }
 
+/** Comfortable default reading font, independent of the (possibly tiny/huge)
+ *  fixed-grid rasterisation font on the live terminal. */
+const READER_DEFAULT_FONT = 14;
+/** Re-extract at most this often while the terminal streams output. */
+const LIVE_REFRESH_MS = 120;
+
 /**
  * Create a text view overlay controller
  */
@@ -135,11 +119,18 @@ export function createTextViewOverlay(): TextViewOverlay {
     const overlay = document.getElementById('textview-overlay');
     const zoomInBtn = document.getElementById('textview-zoom-in');
     const zoomOutBtn = document.getElementById('textview-zoom-out');
+    const wrapBtn = document.getElementById('textview-wrap');
     const body = document.getElementById('textview-body') as HTMLPreElement | null;
 
-    let fontSize = 10; // Default font size in px
+    let fontSize = READER_DEFAULT_FONT; // Persisted across opens
     let initialPinchDistance = 0;
-    let initialFontSize = 10;
+    let initialFontSize = fontSize;
+    let wrap = true;
+
+    // Live-update state while the overlay is visible.
+    let activeTerm: Terminal | null = null;
+    let liveDisposable: { dispose(): void } | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
     function updateFontSize(): void {
         if (body) {
@@ -158,6 +149,44 @@ export function createTextViewOverlay(): TextViewOverlay {
 
     function zoomOut(): void {
         setFontSize(fontSize - FONT_STEP);
+    }
+
+    function applyWrap(): void {
+        if (body) body.style.whiteSpace = wrap ? 'pre-wrap' : 'pre';
+        wrapBtn?.classList.toggle('active', wrap);
+    }
+
+    function toggleWrap(): void {
+        wrap = !wrap;
+        applyWrap();
+    }
+
+    /** Re-extract terminal text, keeping the reader pinned to the bottom when it
+     *  already was (pager feel) and otherwise preserving the scroll position. */
+    function renderContent(term: Terminal): void {
+        if (!body) return;
+        const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 4;
+        const prevTop = body.scrollTop;
+        body.textContent = getTerminalText(term);
+        body.scrollTop = atBottom ? body.scrollHeight : prevTop;
+    }
+
+    /** Coalesce bursts of terminal output into one re-extraction. */
+    function scheduleRefresh(): void {
+        if (refreshTimer !== null) return;
+        refreshTimer = setTimeout(() => {
+            refreshTimer = null;
+            if (activeTerm) renderContent(activeTerm);
+        }, LIVE_REFRESH_MS);
+    }
+
+    function stopLive(): void {
+        liveDisposable?.dispose();
+        liveDisposable = null;
+        if (refreshTimer !== null) {
+            clearTimeout(refreshTimer);
+            refreshTimer = null;
+        }
     }
 
     // Pinch zoom handlers
@@ -192,9 +221,9 @@ export function createTextViewOverlay(): TextViewOverlay {
 
     return {
         show(term: Terminal): void {
-            // Match terminal font size
-            const termFontSize = term.options.fontSize ?? 14;
-            setFontSize(termFontSize);
+            activeTerm = term;
+            updateFontSize();
+            applyWrap();
 
             if (body) {
                 body.textContent = getTerminalText(term);
@@ -206,9 +235,15 @@ export function createTextViewOverlay(): TextViewOverlay {
                     body.scrollTop = body.scrollHeight;
                 }
             });
+
+            // Keep the reader in sync while the command keeps printing.
+            stopLive();
+            liveDisposable = term.onWriteParsed(() => scheduleRefresh());
         },
 
         hide(): void {
+            stopLive();
+            activeTerm = null;
             overlay?.classList.add('hidden');
             if (body) {
                 body.textContent = '';
@@ -219,6 +254,7 @@ export function createTextViewOverlay(): TextViewOverlay {
             // Note: close button handler is set up in main.ts to enable terminal refresh on close
             zoomInBtn?.addEventListener('click', zoomIn);
             zoomOutBtn?.addEventListener('click', zoomOut);
+            wrapBtn?.addEventListener('click', toggleWrap);
 
             // Pinch zoom on body
             body?.addEventListener('touchstart', handleTouchStart, { passive: true });

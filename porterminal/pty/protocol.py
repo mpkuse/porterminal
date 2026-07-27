@@ -21,6 +21,11 @@ class PTYBackend(Protocol):
         """Current number of columns."""
         ...
 
+    @property
+    def process_id(self) -> int | None:
+        """PTY shell process ID when available."""
+        ...
+
     def spawn(
         self,
         cmd: list[str],
@@ -81,6 +86,10 @@ class PTYBackend(Protocol):
 
     def is_echo_enabled(self) -> bool:
         """Check if terminal echo is enabled."""
+        ...
+
+    def get_working_directory(self) -> str | None:
+        """Return the shell process working directory when available."""
         ...
 
     def close(self) -> None:

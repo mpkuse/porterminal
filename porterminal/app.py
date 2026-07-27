@@ -474,7 +474,7 @@ def create_app() -> FastAPI:
         - Localhost (direct access)
         - Cloudflare Tunnel (cf-ray header present)
         - Cloudflare Access authenticated users
-        - Any source when PORTERMINAL_ALLOW_SHUTDOWN=1 (set by run-local.sh)
+        - Any source when PORTERMINAL_ALLOW_SHUTDOWN=1 (set by run_on_localhost.sh)
         """
         # Allow unconditionally when running in local/trusted mode
         allow_unconditionally = os.environ.get("PORTERMINAL_ALLOW_SHUTDOWN") == "1"
@@ -685,16 +685,21 @@ def create_app() -> FastAPI:
 
             # Send session info including current dimensions
             # New clients should adapt to existing dimensions to prevent rendering issues
-            await connection.send_message(
-                {
-                    "type": "session_info",
-                    "session_id": session.session_id,
-                    "shell": session.shell_id,
-                    "tab_id": tab.tab_id,
-                    "cols": session.dimensions.cols,
-                    "rows": session.dimensions.rows,
+            session_info = {
+                "type": "session_info",
+                "session_id": session.session_id,
+                "shell": session.shell_id,
+                "tab_id": tab.tab_id,
+                "cols": session.dimensions.cols,
+                "rows": session.dimensions.rows,
+            }
+            zellij_size_lock = terminal_service.get_zellij_size_lock(session.session_id)
+            if zellij_size_lock is not None:
+                session_info["zellij_size_lock"] = {
+                    "cols": zellij_size_lock.cols,
+                    "rows": zellij_size_lock.rows,
                 }
-            )
+            await connection.send_message(session_info)
 
             # Handle terminal I/O
             await terminal_service.handle_session(
