@@ -26,6 +26,19 @@ What this does in this fork:
 - optional `-p/--password` to require a one-time password, `--host`/`--port` to override the
   bind address, and `--snippets PATH` for Quick Commands
 
+To install a `porterminal` command in a directory on `PATH`, create a symlink with the
+local installer:
+
+```bash
+./install_on_localhost.sh ~/.local/bin
+porterminal
+```
+
+The directory defaults to `~/.local/bin` when omitted. Use `--name COMMAND` to choose a
+different command name. The launcher resolves the symlink back to this checkout, so updates
+to the checkout are picked up without reinstalling. The installer refuses to use a
+non-writable directory and warns when the chosen directory is not on `PATH`.
+
 ### Tailnet access via dev_stack
 
 Exposure on my tailnet and the full start/stop lifecycle live in `~/.bin/dev_stack`:

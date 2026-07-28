@@ -1,7 +1,34 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+porterminal_script_source=$0
+
+# Resolve the real launcher location so this script can be invoked through a
+# symlink installed in a directory on PATH.
+case "$porterminal_script_source" in
+    */*) ;;
+    *)
+        porterminal_script_source=$(command -v "$porterminal_script_source")
+        ;;
+esac
+
+while [ -L "$porterminal_script_source" ]; do
+    porterminal_link_dir=$(
+        CDPATH= cd -P -- "$(dirname -- "$porterminal_script_source")" && pwd
+    )
+    porterminal_link_target=$(readlink "$porterminal_script_source")
+    case "$porterminal_link_target" in
+        /*)
+            porterminal_script_source=$porterminal_link_target
+            ;;
+        *)
+            porterminal_script_source=$porterminal_link_dir/$porterminal_link_target
+            ;;
+    esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -P -- "$(dirname -- "$porterminal_script_source")" && pwd)
+COMMAND_NAME=${0##*/}
 UV_BIN="$HOME/.local/bin/uv"
 HOST="${PORTERMINAL_LOCALHOST_HOST:-127.0.0.1}"
 PORT="${PORTERMINAL_LOCALHOST_PORT:-3444}"
@@ -11,7 +38,7 @@ PROMPT_PASSWORD=0
 
 usage() {
     cat <<EOF
-Usage: ./run_on_localhost.sh [options] [-- porterminal args...]
+Usage: $COMMAND_NAME [options] [-- porterminal args...]
 
 Runs Porterminal on the requested bind address and port.
 No Tailscale Serve and no Cloudflare tunnel are started.
@@ -28,12 +55,12 @@ Options:
   -h, --help      Show this help
 
 Examples:
-  ./run_on_localhost.sh
-  ./run_on_localhost.sh --password
-  ./run_on_localhost.sh --host 127.0.0.1 --port 3445
-  ./run_on_localhost.sh --host 0.0.0.0 --port 3444
-  ./run_on_localhost.sh --port 3445
-  ./run_on_localhost.sh -- --verbose
+  $COMMAND_NAME
+  $COMMAND_NAME --password
+  $COMMAND_NAME --host 127.0.0.1 --port 3445
+  $COMMAND_NAME --host 0.0.0.0 --port 3444
+  $COMMAND_NAME --port 3445
+  $COMMAND_NAME -- --verbose
 EOF
 }
 
